@@ -1,0 +1,743 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "json"
+require "yaml"
+require "fileutils"
+require "pathname"
+
+ROOT = File.expand_path("..", __dir__)
+VATIO_LIB = File.join(ROOT, "tools", "vatio", "lib")
+DOCS_URL = "https://vatio.ai/docs"
+
+require File.join(VATIO_LIB, "cli_config")
+require File.join(VATIO_LIB, "manifest_directory")
+require File.join(VATIO_LIB, "deploy_client")
+require File.join(VATIO_LIB, "sandbox_client")
+require File.join(VATIO_LIB, "sandbox_cli")
+require File.join(VATIO_LIB, "workspace_options")
+require File.join(VATIO_LIB, "device_auth_client")
+require File.join(VATIO_LIB, "workspaces_client")
+require File.join(VATIO_LIB, "project_scaffold")
+require File.join(VATIO_LIB, "tool_spec_parser")
+require File.join(VATIO_LIB, "tools_check")
+require File.join(VATIO_LIB, "version")
+require File.join(VATIO_LIB, "manifest_diff")
+
+class VatioCLI
+  include VatioWorkspaceOptions
+
+  def initialize
+    @config = VatioCliConfig.new(start_dir: Dir.pwd)
+  end
+
+  def run(argv)
+    command = argv.shift
+    unless VatioCliVersion.ruby_supported? || %w[version --version -v doctor help -h --help].include?(command)
+      abort "Vatio CLI requires Ruby >= #{VatioCliVersion::MINIMUM_RUBY}; found #{RUBY_VERSION}. Run `vatio doctor` for details."
+    end
+
+    case command
+    when "version", "--version", "-v" then version_command
+    when "doctor" then doctor_command
+    when "init" then init_command(argv)
+    when "update" then update_command(argv)
+    when "login" then login_command(argv)
+    when "logout" then logout_command(argv)
+    when "new" then new_command(argv)
+    when "workspaces" then workspaces_command(argv)
+    when "push" then push(argv)
+    when "publish" then publish(argv)
+    when "rollback" then rollback(argv)
+    when "status" then status(argv)
+    when "diff" then diff(argv)
+    when "pull" then pull(argv)
+    when "config" then config_command(argv)
+    when "tools" then tools_command(argv)
+    when "secrets" then secrets_command(argv)
+    when "chat"
+      if chat_destroy_command?(argv)
+        destroy_chat!(argv)
+      else
+        chat_cli.run(argv)
+      end
+    when "help", nil, "-h", "--help"
+      print_help
+    else
+      abort "Unknown command: #{command}\n\n#{help_text}"
+    end
+  rescue VatioHttpClient::UnauthorizedError => e
+    abort cli_http_error("Authentication failed (401). Run `vatio login --base-url #{@config.resolve_base_url}`.", e)
+  rescue VatioHttpClient::ForbiddenError => e
+    abort cli_http_error("Access denied (403). Your token cannot access this workspace.", e)
+  rescue VatioHttpClient::NotFoundError => e
+    abort cli_http_error("Remote resource not found (404). Check the workspace slug; `vatio push` creates a missing remote automatically.", e)
+  rescue VatioHttpClient::Error => e
+    abort cli_http_error(e.message, e)
+  rescue VatioCliConfig::Error, VatioProjectScaffold::Error, VatioDeviceAuthClient::Error => e
+    abort e.message
+  end
+
+  private
+
+  def chat_cli
+    VatioSandboxCLI.new(config: @config)
+  end
+
+  def print_help
+    puts help_text
+  end
+
+  def version_command
+    puts "Vatio CLI #{VatioCliVersion::VERSION} (build #{VatioCliVersion.build(ROOT)})"
+    puts "Ruby #{RUBY_VERSION}p#{RUBY_PATCHLEVEL} (#{VatioCliVersion.platform})"
+    puts "Psych #{Psych::VERSION}"
+  end
+
+  def doctor_command
+    version_command
+    puts "CLI executable: #{File.expand_path($PROGRAM_NAME)}"
+    puts "Ruby executable: #{RbConfig.ruby}"
+    puts "Ruby supported: #{VatioCliVersion.ruby_supported? ? "yes" : "no (requires >= #{VatioCliVersion::MINIMUM_RUBY})"}"
+    puts "YAML reader: compatible (File.read + YAML.safe_load)"
+    puts "Base URL: #{@config.resolve_base_url}"
+    puts "Developer root: #{@config.developer_root || "not found"}"
+    puts "Workspace root: #{@config.workspace_root || "not found"}"
+    puts "Token: #{@config.resolve_token.to_s.empty? ? "not configured" : "configured"}"
+    puts "Docs: #{DOCS_URL}"
+  end
+
+  def cli_http_error(message, error)
+    request = error.request_id.to_s.empty? ? nil : "request_id=#{error.request_id}"
+    [ message, request ].compact.join("\n")
+  end
+
+  def help_text
+    <<~HELP
+      Usage: vatio COMMAND [options]
+
+      Diagnostics:
+        version, --version         Show CLI/build/runtime versions
+        doctor                     Check Ruby, Psych, executable, config, and workspace
+
+      Onboarding (developer root — e.g. ~/agents):
+        init [--base-url URL]      Create .vatio/config.json + device login
+        login [--base-url URL]     Refresh developer token
+        logout                     Remove token from .vatio/config.json
+        new workspace SLUG         Create remote + local workspace folder
+        workspaces                 List remote and local workspaces
+
+      Global options (deploy + chat destroy):
+        --workspace SLUG           Workspace slug (else workspace.yml from cwd)
+
+      Deploy:
+        push                       Create missing remote workspace, then push preview
+        publish                    Promote preview → live
+        rollback                   Restore previous live deployment
+        status                     Show preview / live status
+        diff                       Summarize local changes vs remote preview
+        diff --full                Print complete local and remote manifests
+        diff --stat|--name-only|--format json
+        pull                       Export remote live manifest into workspace
+                                   pull --preview exports preview manifest
+
+      Tools (JS workspace tools):
+        tools check                Validate local tools against Vatio contracts
+                                   (also runs automatically before push)
+
+      Secrets (workspace env for JS tools — never printed; apply immediately):
+        secrets list               List secret keys (values are write-only)
+        secrets set KEY VALUE      Create or update a secret (live right away)
+        secrets unset KEY          Delete a secret
+
+      Config (.vatio/config.json at developer root; never commit this file):
+        config show
+        config set KEY VALUE       Keys: base_url, token, channel, from
+        config unset KEY
+        config get KEY
+
+      Target host (local vs production):
+        vatio config set base_url http://vatio.lvh.me:3000
+        vatio config set base_url https://vatio.ai
+        VATIO_BASE_URL=… vatio …   # env overrides config for one command
+
+      Preview chat (always preview — never live):
+        chat "mensaje" [--channel CHANNEL] [--from IDENTITY]
+        chat transcript|debug|reset …
+        chat destroy CHAT_ID [--workspace SLUG]
+
+      Simulated ingress (--channel / --from / config):
+        vatio chat --channel whatsapp --from +56912345678 "…"
+        vatio config set channel whatsapp
+        vatio config set from +56912345678
+
+      Layout:
+        agents/                    Developer root (.vatio/config.json)
+          my-client/               Workspace (workspace.yml, agents/main.yml, tools/)
+
+      Env overrides:
+        VATIO_BASE_URL / config base_url (default https://vatio.ai)
+        VATIO_TOKEN / config token (prefix vat_)
+        VATIO_WORKSPACE / --workspace / workspace.yml slug
+
+      Docs: #{DOCS_URL}
+    HELP
+  end
+
+  def init_command(argv)
+    OptionParser.new do |opts|
+      opts.on("--base-url URL", "Vatio host") { |value| @init_base_url = value }
+    end.parse!(argv)
+
+    if @config.developer_root && @config.config_path.file?
+      abort "Already initialized (#{@config.config_path}). Use `vatio login` to refresh your token."
+    end
+
+    target = Pathname(Dir.pwd)
+    FileUtils.mkdir_p(target.join(".vatio"))
+
+    token = device_login!(
+      base_url: @init_base_url,
+      message: "Starting device authorization for Vatio CLI…"
+    )
+
+    @config = VatioCliConfig.new(start_dir: target.to_s)
+    @config.write_auth!(base_url: token[:base_url], token: token[:token])
+
+    puts
+    puts "Initialized #{target}"
+    puts "Wrote .vatio/config.json (token saved)"
+    puts
+    puts "Docs: #{DOCS_URL}"
+    puts "Next:"
+    puts "  vatio new workspace my-client"
+    puts "  cd my-client"
+  end
+
+  def update_command(_argv)
+    @config.developer_root!
+    puts "`vatio update` no longer installs local skills — there is nothing to refresh."
+    puts "Vatio docs now live at #{DOCS_URL}; point your coding assistant there."
+  end
+
+  def login_command(argv)
+    OptionParser.new do |opts|
+      opts.on("--base-url URL", "Vatio host") { |value| @login_base_url = value }
+    end.parse!(argv)
+
+    @config.developer_root!
+
+    token = device_login!(
+      base_url: @login_base_url,
+      message: "Starting device authorization…"
+    )
+
+    @config.write_auth!(base_url: token[:base_url], token: token[:token])
+    puts "Logged in. Token saved to #{@config.config_path}"
+  end
+
+  def logout_command(_argv)
+    @config.developer_root!
+    @config.clear_token!
+    puts "Removed local token from #{@config.config_path}"
+  end
+
+  def new_command(argv)
+    sub = argv.shift
+    case sub
+    when "workspace" then new_workspace_command(argv)
+    else
+      abort "Usage: vatio new workspace SLUG"
+    end
+  end
+
+  def new_workspace_command(argv)
+    slug = argv.shift.to_s.strip.downcase
+    abort "Usage: vatio new workspace SLUG [--name NAME]" if slug.empty?
+    abort "Invalid slug (use lowercase letters, numbers, hyphens)" unless slug.match?(WorkspaceSlug::FORMAT)
+
+    name = nil
+    OptionParser.new do |opts|
+      opts.on("--name NAME", "Display name") { |value| name = value }
+    end.parse!(argv)
+
+    @config.developer_root!
+    developer_root = @config.developer_root!
+    target = developer_root.join(slug)
+    if target.exist?
+      workspace_file = target.join("workspace.yml")
+      existing_slug = workspace_file.file? ? VatioYamlCompat.load_file(workspace_file)["slug"].to_s : ""
+      unless target.directory? && existing_slug == slug
+        abort "#{target} already exists but is not a compatible Vatio workspace for #{slug.inspect}"
+      end
+      name ||= VatioYamlCompat.load_file(workspace_file)["name"]
+    end
+
+    state = ensure_remote_workspace_for_push!(slug, name: name)
+    VatioProjectScaffold.new.create_workspace!(developer_root, slug: slug, name: name) unless target.exist?
+
+    puts "#{state == :created ? "Created" : "Linked"} remote workspace #{slug}"
+    puts "Local workspace: #{target}"
+    puts "Next: cd #{slug}, then add only the behavior you need (see #{DOCS_URL})"
+  end
+
+  def workspaces_command(_argv)
+    @config.developer_root!
+    payload = workspaces_client.list
+    remote = Array(payload["workspaces"]).map { |row| row["slug"] }
+    local = @config.local_workspace_slugs
+
+    puts "Remote:"
+    remote.each { |slug| puts "  #{slug}" }
+    puts "Local:"
+    local.each { |slug| puts "  #{slug}" }
+  end
+
+  def workspaces_client
+    token = @config.resolve_token
+    abort "Run `vatio login` first (no token in #{@config.config_path})" if token.to_s.empty?
+
+    VatioWorkspacesClient.new(base_url: @config.resolve_base_url, token: token)
+  end
+
+  def ensure_remote_workspace_for_push!(slug, name: nil)
+    client = workspaces_client
+    return :existing if client.exists?(slug)
+
+    client.create(slug: slug, name: name)
+    :created
+  end
+
+  def verify_remote_workspace!(slug)
+    deploy_client(slug).status
+    :existing
+  end
+
+  def device_login!(base_url:, message:)
+    resolved_base = (base_url.presence || ENV["VATIO_BASE_URL"].presence || VatioCliConfig::DEFAULT_BASE_URL).to_s.delete_suffix("/")
+    client = VatioDeviceAuthClient.new(base_url: resolved_base)
+
+    puts message
+    auth = client.start
+    device_code = auth.fetch("device_code")
+    user_code = auth.fetch("user_code")
+    verification_uri = auth["verification_uri_complete"] || auth["verification_uri"]
+    interval = (auth["interval"] || 5).to_i
+    expires_in = (auth["expires_in"] || 900).to_i
+
+    puts
+    puts "Open: #{verification_uri}"
+    puts "Code: #{user_code}"
+    puts
+    open_browser(verification_uri)
+
+    deadline = Time.now + expires_in
+    result = nil
+    loop do
+      abort "Timed out waiting for authorization" if Time.now > deadline
+      begin
+        result = client.poll(device_code: device_code)
+        break
+      rescue VatioDeviceAuthClient::PendingError
+        sleep interval
+      end
+    end
+
+    {
+      token: result.fetch("token"),
+      base_url: result["base_url"].presence || resolved_base
+    }
+  end
+
+  def config_command(argv)
+    sub = argv.shift
+    case sub
+    when "show", nil
+      puts JSON.pretty_generate(@config.display_hash)
+    when "get"
+      key = argv.shift
+      abort "Usage: vatio config get KEY" if key.to_s.strip.empty?
+      value = @config.get(key)
+      abort "unset" if value.nil?
+      puts value
+    when "set"
+      key = argv.shift
+      value = argv.shift
+      abort "Usage: vatio config set KEY VALUE" if key.to_s.strip.empty? || value.nil?
+      @config.developer_root!
+      @config.set(key, value)
+      puts "Set #{key}"
+    when "unset"
+      key = argv.shift
+      abort "Usage: vatio config unset KEY" if key.to_s.strip.empty?
+      @config.developer_root!
+      @config.unset(key)
+      puts "Unset #{key}"
+    else
+      abort "Unknown config command: #{sub}\n\n#{help_text}"
+    end
+  end
+
+  def tools_command(argv)
+    sub = argv.shift
+    case sub
+    when "check"
+      tools_check!(argv)
+    when "invoke"
+      abort "`vatio tools invoke` was removed. Test tools inside `vatio chat` so access/auth run in the agent loop."
+    else
+      abort "Usage: vatio tools check [--workspace SLUG]"
+    end
+  end
+
+  def tools_check!(argv)
+    workspace_from!(argv) # require workspace context / strip --workspace
+    root = @config.workspace_root!
+    result = run_tools_check!(root)
+    print_tools_check_result(result)
+    abort "tools check failed (#{result.errors.size} error(s))" unless result.ok?
+
+    puts "tools check ok (#{tool_count(root)} tool(s))"
+  end
+
+  def run_tools_check!(root)
+    VatioToolsCheck.call(root)
+  end
+
+  def print_tools_check_result(result)
+    result.errors.each { |msg| warn "error: #{msg}" }
+    result.warnings.each { |msg| warn "warning: #{msg}" }
+  end
+
+  def tool_count(root)
+    Dir.glob(File.join(root.to_s, "tools", "*.js")).size
+  end
+
+  def secrets_command(argv)
+    workspace_flag = parse_flag!(argv)
+    sub = argv.shift
+    slug = @config.resolve_workspace(explicit: workspace_flag)
+    abort <<~MSG.chomp if slug.to_s.empty?
+      workspace slug required (--workspace or workspace.yml in current workspace folder)
+    MSG
+
+    client = deploy_client(slug)
+
+    case sub
+    when "list", nil
+      payload = client.list_secrets
+      secrets = Array(payload["secrets"])
+      if secrets.empty?
+        puts "No secrets on workspace #{slug}"
+      else
+        puts "Secrets on workspace #{slug} (#{secrets.size}):"
+        secrets.each do |row|
+          status = row["configured"] ? "configured" : "empty"
+          puts "  #{row["key"]}  #{status}  updated=#{row["updated_at"]}"
+        end
+      end
+    when "set"
+      key = argv.shift.to_s.strip
+      value = argv.join(" ")
+      abort "Usage: vatio secrets set KEY VALUE [--workspace SLUG]" if key.empty? || value.empty?
+      abort "Invalid key #{key.inspect} (use A-Z, 0-9, _; must start with a letter)" unless key.match?(/\A[A-Z][A-Z0-9_]{0,63}\z/)
+
+      payload = client.upsert_secret(key: key, value: value)
+      action = payload["created"] ? "Created" : "Updated"
+      puts "#{action} secret #{payload["key"]} on workspace #{slug}"
+      puts "  Status: #{payload["configured"] ? "configured" : "empty"}"
+      puts "  Updated: #{payload["updated_at"]}"
+      puts "  Available to tools immediately (not part of push/publish)."
+    when "unset", "delete", "rm"
+      key = argv.shift.to_s.strip
+      abort "Usage: vatio secrets unset KEY [--workspace SLUG]" if key.empty?
+
+      begin
+        client.delete_secret(key: key)
+        puts "Removed secret #{key} from workspace #{slug}"
+      rescue VatioDeployClient::NotFoundError
+        abort "Secret not found: #{key}"
+      end
+    else
+      abort "Usage: vatio secrets list|set KEY VALUE|unset KEY [--workspace SLUG]"
+    end
+  end
+
+
+  def push(argv)
+    workspace = workspace_from!(argv)
+    root = @config.workspace_root!
+    check = run_tools_check!(root)
+    print_tools_check_result(check)
+    abort "push aborted: tools check failed (#{check.errors.size} error(s))" unless check.ok?
+
+    manifest = load_local_manifest!
+    state = ensure_remote_workspace_for_push!(workspace, name: manifest.dig("workspace", "name"))
+    puts "Created remote workspace #{workspace}" if state == :created
+    client = deploy_client(workspace)
+    git_sha = detect_git_sha
+    payload = client.push_preview(
+      manifest: manifest,
+      git_sha: git_sha,
+      created_by: ENV["USER"]
+    )
+    puts "Pushed preview deployment ##{payload["deployment_id"]} (git_sha=#{payload["git_sha"].inspect})"
+    Array(payload["warnings"]).each { |warning| puts "  warning: #{warning}" }
+  end
+
+  def publish(argv)
+    workspace = workspace_from!(argv)
+    client = deploy_client(workspace)
+    payload = client.publish(created_by: ENV["USER"])
+    puts "Published live deployment ##{payload["deployment_id"]} (git_sha=#{payload["git_sha"].inspect})"
+  end
+
+  def rollback(argv)
+    workspace = workspace_from!(argv)
+    client = deploy_client(workspace)
+    payload = client.rollback(created_by: ENV["USER"])
+    puts "Rolled back to deployment ##{payload["deployment_id"]} (from ##{payload["rolled_back_from_id"]})"
+  end
+
+  def status(argv)
+    workspace = workspace_from!(argv)
+    client = deploy_client(workspace)
+    payload = client.status
+    puts JSON.pretty_generate(payload)
+  end
+
+  def diff(argv)
+    workspace_flag = parse_flag!(argv)
+    options = parse_diff_options!(argv)
+    workspace = workspace_from!(workspace_flag ? [ workspace_flag ] : argv)
+    verify_remote_workspace!(workspace)
+    client = deploy_client(workspace)
+    local = load_local_manifest!
+    remote = begin
+      client.manifest(environment: "preview")["manifest"]
+    rescue VatioDeployClient::NotFoundError
+      {}
+    end
+    remote ||= {}
+    changes = VatioManifestDiff.call(local: local, remote: remote)
+    if changes.empty?
+      puts "No diff vs remote preview"
+    elsif options[:full]
+      warn "Warning: --full prints complete knowledge bodies and tool source. Avoid using it in shared CI logs."
+      puts "=== local ==="
+      puts YAML.dump(local)
+      puts "=== remote preview ==="
+      puts YAML.dump(remote)
+    elsif options[:format] == "json"
+      puts JSON.pretty_generate({ "workspace" => workspace, "changes" => changes })
+    elsif options[:stat]
+      counts = changes.group_by { |change| change["status"] }.transform_values(&:size)
+      puts "#{changes.size} change(s): #{counts.map { |status, count| "#{count} #{status}" }.join(", ")}"
+    elsif options[:name_only]
+      changes.each { |change| puts diff_label(change) }
+    else
+      changes.each do |change|
+        fields = change["fields"].empty? ? "" : " (#{change["fields"].join(", ")})"
+        puts "#{diff_status_letter(change["status"])} #{diff_label(change)}#{fields}"
+      end
+      puts "Use `vatio diff --full` to print complete knowledge and source bodies."
+    end
+  end
+
+  def parse_diff_options!(argv)
+    options = { full: false, stat: false, name_only: false, format: nil }
+    OptionParser.new do |opts|
+      opts.on("--full", "Print full manifests") { options[:full] = true }
+      opts.on("--stat", "Print counts only") { options[:stat] = true }
+      opts.on("--name-only", "Print changed entity names only") { options[:name_only] = true }
+      opts.on("--format FORMAT", %w[text json], "Output format (text|json)") { |value| options[:format] = value }
+    end.parse!(argv)
+    options
+  end
+
+  def diff_label(change)
+    change["type"] == change["key"] ? change["type"] : "#{change["type"]}/#{change["key"]}"
+  end
+
+  def diff_status_letter(status)
+    { "added" => "A", "modified" => "M", "removed" => "D" }.fetch(status, "?")
+  end
+
+  def pull(argv)
+    workspace = workspace_from!(argv)
+    client = deploy_client(workspace)
+    environment = (argv.include?("--preview") || argv.include?("--staging")) ? "preview" : "live"
+    payload = client.manifest(environment: environment)
+    write_manifest_to_disk!(payload.fetch("manifest"))
+    puts "Wrote workspace from remote #{environment}"
+  end
+
+  def workspace_from!(argv)
+    workspace_flag = parse_flag!(argv)
+
+    explicit = workspace_flag
+    unless explicit
+      first = argv.first
+      if first && !first.start_with?("-")
+        explicit = argv.shift
+      end
+    end
+
+    slug = @config.resolve_workspace(explicit: explicit)
+    abort <<~MSG.chomp if slug.to_s.empty?
+      workspace slug required (--workspace or workspace.yml in current workspace folder)
+    MSG
+
+    slug.downcase
+  end
+
+  def deploy_client(workspace)
+    base = @config.resolve_base_url
+    abort "VATIO_BASE_URL is required (env or `vatio config set base_url …`)" if base.to_s.empty?
+    token = @config.resolve_token
+    abort "VATIO_TOKEN is required (env or `vatio login`)" if token.to_s.empty?
+
+    VatioDeployClient.new(base_url: "#{base}/api/dev/#{workspace}", token: token)
+  end
+
+  def load_local_manifest!
+    root = @config.workspace_root!
+    VatioManifestDirectory.load(root)
+  end
+
+  def write_manifest_to_disk!(manifest)
+    root = @config.workspace_root!
+    FileUtils.mkdir_p(root.join("agents"))
+    FileUtils.mkdir_p(root.join("knowledge"))
+
+    workspace = (manifest["workspace"] || {}).dup
+    authentication = manifest["authentication"]
+    workspace["authentication"] = authentication if authentication.is_a?(Hash) && authentication.any?
+    File.write(root.join("workspace.yml"), YAML.dump(workspace))
+
+    Dir.glob(root.join("agents", "*.yml")).each { |path| File.delete(path) }
+    (manifest["agents"] || {}).each do |key, data|
+      File.write(root.join("agents", "#{key}.yml"), YAML.dump(data))
+    end
+
+    Dir.glob(root.join("knowledge", "*.md")).each { |path| File.delete(path) }
+    Array(manifest["knowledge"]).each_with_index do |entry, index|
+      source = entry["source"]
+      source = "#{index + 1}-#{slugify(entry["title"])}.md" if source.to_s.strip.empty?
+      body = "# #{entry["title"]}\n\n#{entry["body"]}\n"
+      File.write(root.join("knowledge", source), body)
+    end
+
+    FileUtils.mkdir_p(root.join("tools"))
+    Dir.glob(root.join("tools", "*.js")).each { |path| File.delete(path) }
+    Array(manifest["tools"]).each do |entry|
+      key = entry["key"].to_s
+      next if key.blank?
+
+      File.write(root.join("tools", "#{key}.js"), entry["source"].to_s)
+    end
+
+    FileUtils.mkdir_p(root.join("lib"))
+    Dir.glob(root.join("lib", "*.js")).each { |path| File.delete(path) }
+    Array(manifest["libs"]).each do |entry|
+      key = entry["key"].to_s
+      next if key.empty?
+
+      File.write(root.join("lib", "#{key}.js"), entry["source"].to_s)
+    end
+
+    FileUtils.mkdir_p(root.join("auth"))
+    Dir.glob(root.join("auth", "*.js")).each { |path| File.delete(path) }
+    Array(manifest["auth_providers"]).each do |entry|
+      key = entry["key"].to_s
+      next if key.empty?
+
+      File.write(root.join("auth", "#{key}.js"), entry["source"].to_s)
+    end
+  end
+
+  def slugify(value)
+    value.to_s.downcase.gsub(/[^a-z0-9]+/, "-").gsub(/^-|-$/, "").presence || "entry"
+  end
+
+  def detect_git_sha
+    root = @config.workspace_root || @config.developer_root || Pathname(Dir.pwd)
+    Dir.chdir(root) do
+      sha = `git rev-parse HEAD 2>/dev/null`.strip
+      sha.empty? ? nil : sha
+    end
+  end
+
+  def chat_destroy_command?(argv)
+    %w[destroy delete].include?(argv.first.to_s)
+  end
+
+  def destroy_chat!(argv)
+    argv.shift
+    workspace_flag = parse_flag!(argv)
+    chat_id = argv.shift
+    abort "Usage: vatio chat destroy CHAT_ID [--workspace SLUG]" if chat_id.to_s.strip.empty?
+
+    workspace = @config.resolve_workspace(explicit: workspace_flag)
+    if workspace.to_s.empty?
+      abort <<~MSG.chomp
+        workspace slug required (--workspace or workspace.yml in current workspace folder)
+      MSG
+    end
+
+    deploy_client(workspace).destroy_chat(chat_id)
+    clear_local_chat_sessions!(chat_id)
+    puts "Destroyed chat #{chat_id} in #{workspace}"
+  end
+
+  def clear_local_chat_sessions!(chat_id)
+    target_id = chat_id.to_i
+    root = (@config.workspace_root || Pathname(Dir.pwd)).to_s
+    [ ".vatio-sandbox.json", ".vatio-chat.json" ].each do |filename|
+      path = File.join(root, filename)
+      next unless File.file?(path)
+
+      state = JSON.parse(File.read(path))
+      next unless state["chat_id"].to_i == target_id
+
+      File.delete(path)
+    end
+  rescue JSON::ParserError
+    nil
+  end
+
+  def open_browser(url)
+    return if url.to_s.strip.empty?
+
+    case RbConfig::CONFIG["host_os"]
+    when /darwin/i then system("open", url)
+    when /linux/i then system("xdg-open", url)
+    when /mswin|mingw/i then system("start", url)
+    end
+  rescue StandardError
+    nil
+  end
+end
+
+module WorkspaceSlug
+  FORMAT = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
+end
+
+class Object
+  def presence
+    respond_to?(:empty?) && empty? ? nil : self
+  end unless method_defined?(:presence)
+
+  def present?
+    !blank?
+  end unless method_defined?(:present?)
+
+  def blank?
+    respond_to?(:empty?) ? empty? : !self
+  end unless method_defined?(:blank?)
+end
+
+if __FILE__ == $PROGRAM_NAME
+  VatioCLI.new.run(ARGV)
+end
