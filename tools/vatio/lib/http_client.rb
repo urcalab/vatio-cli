@@ -110,19 +110,19 @@ class VatioHttpClient
     when 200..299
       return {} if response.body.to_s.strip.empty?
 
-      raise Error.new("HTTP #{status}: invalid JSON", status:, request_id:) unless body
+      raise Error.new("HTTP #{status}: invalid JSON", status: status, request_id: request_id) unless body
 
       body
     when 401
-      raise UnauthorizedError.new(message, status:, request_id:, body:)
+      raise UnauthorizedError.new(message, status: status, request_id: request_id, body: body)
     when 403
-      raise ForbiddenError.new(message, status:, request_id:, body:)
+      raise ForbiddenError.new(message, status: status, request_id: request_id, body: body)
     when 404
-      raise NotFoundError.new(message, status:, request_id:, body:)
+      raise NotFoundError.new(message, status: status, request_id: request_id, body: body)
     when 422
       raise build_unprocessable_error(body)
     else
-      raise Error.new("HTTP #{status}: #{message}", status:, request_id:, body:)
+      raise Error.new("HTTP #{status}: #{message}", status: status, request_id: request_id, body: body)
     end
   end
 

@@ -14,7 +14,7 @@ class VatioManifestDiff
   SINGLETONS = %w[workspace authentication].freeze
 
   def self.call(local:, remote:)
-    new(local:, remote:).changes
+    new(local: local, remote: remote).changes
   end
 
   def initialize(local:, remote:)

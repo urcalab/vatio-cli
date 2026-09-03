@@ -48,3 +48,9 @@ aquí en cada release.
 ```bash
 ruby tools/vatio/test/cli_dx_test.rb
 ```
+
+## Licencia
+
+Software propietario de Urcalab, distribuido solo para instalar y usar
+el Vatio CLI contra la plataforma [vatio.ai](https://vatio.ai). Ver
+[`LICENSE.txt`](LICENSE.txt).

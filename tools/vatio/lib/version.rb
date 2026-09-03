@@ -6,7 +6,7 @@ require "rubygems/version"
 
 module VatioCliVersion
   VERSION = "0.2.0"
-  MINIMUM_RUBY = Gem::Version.new("3.2.0")
+  MINIMUM_RUBY = Gem::Version.new("2.6.0")
 
   module_function
 

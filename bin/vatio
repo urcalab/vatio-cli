@@ -738,6 +738,9 @@ class Object
   end unless method_defined?(:blank?)
 end
 
-if __FILE__ == $PROGRAM_NAME
+# Exact __FILE__ == $PROGRAM_NAME breaks under RubyGems' generated bin
+# stub, which `load`s this file without changing $PROGRAM_NAME to match
+# its real path — compare basenames so `gem install` executables still run.
+if File.basename(__FILE__) == File.basename($PROGRAM_NAME.to_s)
   VatioCLI.new.run(ARGV)
 end
