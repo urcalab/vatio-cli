@@ -1,25 +1,25 @@
 # Vatio CLI
 
-CLI para desplegar y administrar workspaces de [Vatio](https://vatio.ai), la
-plataforma de agentes de IA.
+CLI to deploy and manage [Vatio](https://vatio.ai) workspaces, the AI agent
+platform.
 
-Solo depende de la librería estándar de Ruby (>= 2.6) — sin gems, sin Bundler.
-Corre con el Ruby que ya tengas instalado (incluido el Ruby de sistema de
-macOS).
+Depends only on Ruby's standard library (>= 2.6) — no gems, no Bundler.
+Runs with whatever Ruby you already have installed (including macOS's
+system Ruby).
 
-## Instalación
+## Installation
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/urcalab/vatio-cli/main/install.sh | bash
 ```
 
-Descarga el último release, lo instala en `~/.vatio-cli/` y enlaza
-`vatio` en `~/.local/bin/`. No requiere `git`, `gem` ni `brew` — solo
-`curl`, `tar`, y Ruby >= 2.6 en el `PATH`.
+Downloads the latest release, installs it into `~/.vatio-cli/`, and links
+`vatio` into `~/.local/bin/`. Requires no `git`, `gem`, or `brew` — just
+`curl`, `tar`, and Ruby >= 2.6 on your `PATH`.
 
-Para fijar una versión específica: `VATIO_CLI_VERSION=v0.2.0 curl ... | bash`.
+To pin a specific version: `VATIO_CLI_VERSION=v0.2.0 curl ... | bash`.
 
-### Manual (clonar el repo)
+### Manual (clone the repo)
 
 ```bash
 git clone https://github.com/urcalab/vatio-cli.git
@@ -27,36 +27,27 @@ cd vatio-cli
 ./bin/vatio version
 ```
 
-Agrega `bin/` al `PATH`, o enlaza `bin/vatio` a algún directorio ya en tu `PATH`.
+Add `bin/` to your `PATH`, or symlink `bin/vatio` into a directory already
+on your `PATH`.
 
-## Uso
+## Usage
 
 ```bash
-vatio init                    # crea .vatio/config.json + login por device code
+vatio init                    # creates .vatio/config.json + device code login
 vatio new workspace my-client
 cd my-client
-vatio push                    # sube preview
-vatio publish                 # promueve a live
+vatio push                    # uploads preview
+vatio publish                 # promotes to live
 ```
 
-Corre `vatio help` para el listado completo de comandos.
+Run `vatio help` for the full list of commands.
 
-## Documentación
+## Documentation
 
 [vatio.ai/docs](https://vatio.ai/docs)
 
-## Desarrollo
+## License
 
-Este repo es un espejo publicado de `tools/vatio/` en el monolito
-`urcalab/vatio` (privado). Los cambios se desarrollan ahí y se sincronizan
-aquí en cada release.
-
-```bash
-ruby tools/vatio/test/cli_dx_test.rb
-```
-
-## Licencia
-
-Software propietario de Urcalab, distribuido solo para instalar y usar
-el Vatio CLI contra la plataforma [vatio.ai](https://vatio.ai). Ver
+Proprietary software of Urcalab, distributed solely to install and use
+the Vatio CLI against the [vatio.ai](https://vatio.ai) platform. See
 [`LICENSE.txt`](LICENSE.txt).
