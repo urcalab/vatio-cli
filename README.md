@@ -3,17 +3,23 @@
 CLI para desplegar y administrar workspaces de [Vatio](https://vatio.ai), la
 plataforma de agentes de IA.
 
-Solo depende de la librería estándar de Ruby (>= 3.2) — sin gems, sin Bundler.
+Solo depende de la librería estándar de Ruby (>= 2.6) — sin gems, sin Bundler.
+Corre con el Ruby que ya tengas instalado (incluido el Ruby de sistema de
+macOS).
 
 ## Instalación
 
-### Homebrew (macOS/Linux)
-
 ```bash
-brew install urcalab/vatio/vatio
+curl -fsSL https://raw.githubusercontent.com/urcalab/vatio-cli/main/install.sh | bash
 ```
 
-### Manual
+Descarga el último release, lo instala en `~/.vatio-cli/` y enlaza
+`vatio` en `~/.local/bin/`. No requiere `git`, `gem` ni `brew` — solo
+`curl`, `tar`, y Ruby >= 2.6 en el `PATH`.
+
+Para fijar una versión específica: `VATIO_CLI_VERSION=v0.2.0 curl ... | bash`.
+
+### Manual (clonar el repo)
 
 ```bash
 git clone https://github.com/urcalab/vatio-cli.git
