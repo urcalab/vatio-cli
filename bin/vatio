@@ -484,6 +484,16 @@ class VatioCLI
     )
     puts "Pushed preview deployment ##{payload["deployment_id"]} (git_sha=#{payload["git_sha"].inspect})"
     Array(payload["warnings"]).each { |warning| puts "  warning: #{warning}" }
+
+    preview_url = payload["preview_url"]
+    puts "Preview: #{preview_url}" if preview_url
+
+    hint = payload["whatsapp_sandbox_hint"]
+    if hint
+      puts
+      puts hint["message"]
+      puts "  #{hint["url"]}"
+    end
   end
 
   def publish(argv)
