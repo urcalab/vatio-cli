@@ -75,6 +75,58 @@ class VatioCliDxTest < Minitest::Test
     end
   end
 
+  def test_manifest_loads_yaml_declarative_http_tool_alongside_js
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      FileUtils.mkdir_p(File.join(dir, "tools"))
+      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help visitors.\n")
+      File.write(
+        File.join(dir, "tools", "lookup.js"),
+        "export const spec = { description: \"Lookup\", parameters: { type: \"object\", properties: {} } };\n" \
+        "export default async function lookup() { return { result: \"ok\", message: \"ok\" }; }\n"
+      )
+      File.write(File.join(dir, "tools", "list_plans.yml"), <<~YAML)
+        description: "Lists plans."
+        when_to_use: "When asked about plans."
+        request:
+          method: GET
+          base_url: "$env.WAVE_API_BASE"
+          path: /api/plans
+        respond:
+          data:
+            plans: "$.data"
+      YAML
+
+      manifest = VatioManifestDirectory.load(dir)
+      tools = manifest["tools"].to_h { |tool| [ tool["key"], tool ] }
+
+      assert_equal %w[list_plans lookup], tools.keys.sort
+      assert_equal "js", tools["lookup"]["kind"]
+      assert_equal "http", tools["list_plans"]["kind"]
+      assert_equal "Lists plans.", tools["list_plans"]["description"]
+    end
+  end
+
+  def test_tools_check_validates_yaml_tool_request_shape
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      FileUtils.mkdir_p(File.join(dir, "tools"))
+      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
+      File.write(File.join(dir, "tools", "broken.yml"), <<~YAML)
+        description: "Missing request method"
+        request:
+          path: /api/plans
+      YAML
+
+      result = VatioToolsCheck.call(dir)
+
+      refute result.ok?
+      assert_includes result.errors.join, "request.method must be one of"
+    end
+  end
+
   def test_manifest_diff_never_contains_source_or_knowledge_bodies
     local = {
       "tools" => [ { "key" => "lookup", "source" => "new secret source" } ],
