@@ -9,6 +9,7 @@ require_relative "../lib/http_client"
 require_relative "../lib/manifest_directory"
 require_relative "../lib/manifest_diff"
 require_relative "../lib/project_scaffold"
+require_relative "../lib/release_check"
 require_relative "../lib/tools_check"
 require_relative "../lib/version"
 require_relative "../lib/workspaces_client"
@@ -184,6 +185,20 @@ class VatioCliDxTest < Minitest::Test
     end
   end
 
+  def test_version_stays_clean_when_installed_without_a_git_checkout
+    Dir.mktmpdir do |dir|
+      repo_root = File.expand_path("..", File.dirname(CLI_PATH))
+      FileUtils.cp_r(File.join(repo_root, "bin"), dir)
+      FileUtils.cp_r(File.join(repo_root, "tools"), dir)
+
+      stdout, stderr, status = Open3.capture3(File.join(dir, "bin", "vatio"), "version", chdir: dir)
+
+      assert status.success?, stderr
+      assert_includes stdout, "build unknown"
+      assert_empty stderr
+    end
+  end
+
   def test_version_declares_supported_ruby_range
     assert_operator VatioCliVersion::MINIMUM_RUBY, :<=, Gem::Version.new("3.2.0")
     assert VatioCliVersion.ruby_supported?
@@ -219,16 +234,62 @@ class VatioCliDxTest < Minitest::Test
     end
   end
 
-  def test_update_points_to_docs_instead_of_installing_skills
+  def test_update_refuses_to_self_install_over_a_git_checkout
     Dir.mktmpdir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".vatio"))
-      File.write(File.join(dir, ".vatio", "config.json"), JSON.generate(token: "vat_x", base_url: "https://vatio.example"))
-
       stdout, stderr, status = Open3.capture3(CLI_PATH, "update", chdir: dir)
 
+      refute status.success?
+      assert_empty stdout
+      assert_match(/git checkout/i, stderr)
+      assert_match(/git pull/i, stderr)
+    end
+  end
+
+  def test_release_check_compares_tags_tolerating_the_v_prefix
+    assert VatioReleaseCheck.newer?(current: "0.2.0", latest: "v0.3.0")
+    assert VatioReleaseCheck.newer?(current: "0.2.0", latest: "0.2.1")
+    refute VatioReleaseCheck.newer?(current: "0.2.0", latest: "v0.2.0")
+    refute VatioReleaseCheck.newer?(current: "0.3.0", latest: "v0.2.0")
+  end
+
+  def test_release_check_stays_quiet_on_a_missing_or_unparsable_tag
+    refute VatioReleaseCheck.newer?(current: "0.2.0", latest: nil)
+    refute VatioReleaseCheck.newer?(current: "0.2.0", latest: "")
+    refute VatioReleaseCheck.newer?(current: "0.2.0", latest: "nightly")
+  end
+
+  def test_release_check_serves_a_fresh_tag_from_cache_without_network
+    Dir.mktmpdir do |dir|
+      with_env("VATIO_CLI_HOME" => dir) do
+        now = Time.now
+        VatioReleaseCheck.write_cache(tag: "v9.9.9", now: now)
+
+        assert_equal File.join(dir, "release-check.json"), VatioReleaseCheck.cache_path
+        assert_equal "v9.9.9", VatioReleaseCheck.cached_latest_tag(now: now + 60)
+
+        VatioReleaseCheck.clear_cache!
+
+        assert_nil VatioReleaseCheck.read_cache
+      end
+    end
+  end
+
+  def test_release_notice_can_be_switched_off_by_env
+    with_env("VATIO_CLI_NO_UPDATE_CHECK" => "1") { assert VatioReleaseCheck.disabled? }
+    with_env("VATIO_CLI_NO_UPDATE_CHECK" => nil, "CI" => "true") { assert VatioReleaseCheck.disabled? }
+    with_env("VATIO_CLI_NO_UPDATE_CHECK" => nil, "CI" => nil) { refute VatioReleaseCheck.disabled? }
+  end
+
+  def test_commands_never_print_the_release_notice_when_output_is_piped
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".vatio"))
+      File.write(File.join(dir, ".vatio", "config.json"), JSON.generate(token: "vat_x"))
+
+      stdout, stderr, status = Open3.capture3(CLI_PATH, "version", chdir: dir)
+
       assert status.success?, stderr
-      assert_includes stdout, "https://vatio.ai/docs"
-      refute_includes stdout, "skill added"
+      assert_includes stdout, "Vatio CLI #{VatioCliVersion::VERSION}"
+      refute_match(/out of date/i, stderr)
     end
   end
 
@@ -245,6 +306,14 @@ class VatioCliDxTest < Minitest::Test
   end
 
   private
+
+  def with_env(vars)
+    previous = vars.keys.to_h { |key| [ key, ENV[key] ] }
+    vars.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
 
   def directory_snapshot(root)
     Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH).to_h do |path|
