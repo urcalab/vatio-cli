@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "yaml"
 require "pathname"
 require_relative "tool_spec_parser"
 require_relative "manifest_directory"
@@ -43,6 +44,10 @@ module VatioToolsCheck
 
     Dir.glob(root.join("tools", "*.js")).sort.each do |path|
       validate_tool_file!(path, errors, warnings)
+    end
+
+    Dir.glob(root.join("tools", "*.{yml,yaml}")).sort.each do |path|
+      validate_yaml_tool_file!(path, errors, warnings)
     end
 
     Dir.glob(root.join("lib", "*.js")).sort.each do |path|
@@ -130,6 +135,51 @@ module VatioToolsCheck
     validate_result_contract!(label, source, errors)
   end
   private_class_method :validate_tool_file!
+
+  HTTP_METHODS = %w[GET POST PATCH DELETE].freeze
+
+  # tools/*.yml — declarative single HTTP call (kind: "http"). No JS parsing:
+  # just the shape Vatio::Tools::WorkspaceHttpTool expects at runtime.
+  def validate_yaml_tool_file!(path, errors, warnings)
+    key = File.basename(path, ".*")
+    label = "tools/#{File.basename(path)}"
+
+    unless key.match?(VatioToolSpecParser::KEY_FORMAT)
+      errors << "#{label}: invalid key #{key.inspect} (use lowercase letters, digits, - or _)"
+    end
+
+    begin
+      spec = YAML.safe_load(File.read(path), permitted_classes: [], permitted_symbols: [], aliases: false, filename: path.to_s) || {}
+    rescue Psych::SyntaxError => e
+      errors << "#{label}: invalid YAML (#{e.message})"
+      return
+    end
+
+    description = spec["description"].to_s.strip
+    errors << "#{label}: description is required" if description.empty?
+
+    when_to_use = spec["when_to_use"].to_s.strip
+    warnings << "#{label}: when_to_use is empty (falls back to description)" if when_to_use.empty?
+
+    validate_raw_access!(label, spec["access"], errors)
+
+    request = spec["request"]
+    unless request.is_a?(Hash)
+      errors << "#{label}: request: is required"
+      return
+    end
+
+    method = request["method"].to_s.upcase
+    unless HTTP_METHODS.include?(method)
+      errors << "#{label}: request.method must be one of #{HTTP_METHODS.join(', ')} (got #{request["method"].inspect})"
+    end
+
+    errors << "#{label}: request.path is required" if request["path"].to_s.strip.empty?
+
+    respond = spec["respond"]
+    errors << "#{label}: respond must be an object" if respond && !respond.is_a?(Hash)
+  end
+  private_class_method :validate_yaml_tool_file!
 
   # The tool result contract is { result: "ok" | "error", message }. `success` was
   # removed because it conflated "the call worked" with "the answer is affirmative":

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "yaml"
 
 # Keep in sync with tools/vatio/lib/tool_spec_parser.rb
 module VatioToolSpecParser
@@ -9,12 +10,17 @@ module VatioToolSpecParser
 
   module_function
 
+  # tools/*.js — full JS logic, runs sandboxed via JsRuntime (kind: "js").
+  # tools/*.yml — declarative single HTTP call, runs natively, no sandbox
+  # round-trip (kind: "http"). See Vatio::Tools::WorkspaceHttpTool for the spec.
   def load_tools_from_directory(root)
     path = Pathname(root)
     tools_dir = path.join("tools")
     return [] unless tools_dir.directory?
 
-    Dir.glob(tools_dir.join("*.js")).sort.map { |file| load_tool_file(file) }.compact
+    js = Dir.glob(tools_dir.join("*.js")).sort.map { |file| load_tool_file(file) }.compact
+    yml = Dir.glob(tools_dir.join("*.{yml,yaml}")).sort.map { |file| load_yaml_tool_file(file) }.compact
+    (js + yml).sort_by { |row| row["key"] }
   end
 
   def load_auth_providers_from_directory(root)
@@ -66,7 +72,31 @@ module VatioToolSpecParser
       "when_to_use" => spec.fetch("when_to_use", spec["description"]).to_s,
       "parameters" => spec["parameters"].is_a?(Hash) ? spec["parameters"] : {},
       "access" => access,
-      "source" => source
+      "source" => source,
+      "kind" => "js"
+    }.tap { |row| row.delete("access") if access.nil? }
+  end
+
+  # tools/*.yml: {description, when_to_use, parameters, access, request:, respond:}.
+  # `source` keeps the whole file — Vatio::Tools::WorkspaceHttpTool reads the
+  # request:/respond: keys back out of it at call time.
+  def load_yaml_tool_file(path)
+    source = File.read(path)
+    key = File.basename(path, ".*")
+    spec = YAML.safe_load(source, permitted_classes: [], permitted_symbols: [], aliases: false, filename: path.to_s) || {}
+    raise ArgumentError, "missing request: in #{path}" unless spec["request"].is_a?(Hash)
+
+    access = wire_access(spec["access"])
+
+    {
+      "key" => key,
+      "name" => spec.fetch("name", key.tr("_-", " ").split.map(&:capitalize).join(" ")),
+      "description" => spec.fetch("description", "").to_s,
+      "when_to_use" => spec.fetch("when_to_use", spec["description"]).to_s,
+      "parameters" => spec["parameters"].is_a?(Hash) ? spec["parameters"] : {},
+      "access" => access,
+      "source" => source,
+      "kind" => "http"
     }.tap { |row| row.delete("access") if access.nil? }
   end
 

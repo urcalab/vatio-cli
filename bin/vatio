@@ -640,12 +640,13 @@ class VatioCLI
     end
 
     FileUtils.mkdir_p(root.join("tools"))
-    Dir.glob(root.join("tools", "*.js")).each { |path| File.delete(path) }
+    Dir.glob(root.join("tools", "*.{js,yml,yaml}")).each { |path| File.delete(path) }
     Array(manifest["tools"]).each do |entry|
       key = entry["key"].to_s
       next if key.blank?
 
-      File.write(root.join("tools", "#{key}.js"), entry["source"].to_s)
+      extension = (entry["kind"] == "http") ? "yml" : "js"
+      File.write(root.join("tools", "#{key}.#{extension}"), entry["source"].to_s)
     end
 
     FileUtils.mkdir_p(root.join("lib"))
