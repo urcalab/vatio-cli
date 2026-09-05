@@ -14,7 +14,9 @@ module VatioCliVersion
     configured = ENV["VATIO_CLI_BUILD"].to_s.strip
     return configured unless configured.empty?
 
-    stdout, status = Open3.capture2("git", "rev-parse", "--short=12", "HEAD", chdir: root)
+    # capture3, not capture2: a tarball install has no .git, and git's
+    # "fatal: not a git repository" must not leak into `vatio version`.
+    stdout, _stderr, status = Open3.capture3("git", "rev-parse", "--short=12", "HEAD", chdir: root)
     status.success? ? stdout.strip : "unknown"
   rescue SystemCallError
     "unknown"

@@ -23,6 +23,7 @@ require File.join(VATIO_LIB, "project_scaffold")
 require File.join(VATIO_LIB, "tool_spec_parser")
 require File.join(VATIO_LIB, "tools_check")
 require File.join(VATIO_LIB, "version")
+require File.join(VATIO_LIB, "release_check")
 require File.join(VATIO_LIB, "manifest_diff")
 
 class VatioCLI
@@ -67,6 +68,8 @@ class VatioCLI
     else
       abort "Unknown command: #{command}\n\n#{help_text}"
     end
+
+    notify_new_release(command)
   rescue VatioHttpClient::UnauthorizedError => e
     abort cli_http_error("Authentication failed (401). Run `vatio login --base-url #{@config.resolve_base_url}`.", e)
   rescue VatioHttpClient::ForbiddenError => e
@@ -120,6 +123,7 @@ class VatioCLI
       Diagnostics:
         version, --version         Show CLI/build/runtime versions
         doctor                     Check Ruby, Psych, executable, config, and workspace
+        update [--version TAG]     Upgrade the CLI to the latest published release
 
       Onboarding (developer root — e.g. ~/agents):
         init [--base-url URL]      Create .vatio/config.json + device login
@@ -180,6 +184,7 @@ class VatioCLI
         VATIO_BASE_URL / config base_url (default https://vatio.ai)
         VATIO_TOKEN / config token (prefix vat_)
         VATIO_WORKSPACE / --workspace / workspace.yml slug
+        VATIO_CLI_NO_UPDATE_CHECK=1  Silence the daily "new release" notice
 
       Docs: #{DOCS_URL}
     HELP
@@ -215,10 +220,53 @@ class VatioCLI
     puts "  cd my-client"
   end
 
-  def update_command(_argv)
-    @config.developer_root!
-    puts "`vatio update` no longer installs local skills — there is nothing to refresh."
-    puts "Vatio docs now live at #{DOCS_URL}; point your coding assistant there."
+  def update_command(argv)
+    requested = nil
+    force = false
+    OptionParser.new do |opts|
+      opts.on("--version TAG", "Install a specific release tag (e.g. v0.2.0)") { |value| requested = value }
+      opts.on("--force", "Reinstall even when already up to date") { force = true }
+    end.parse!(argv)
+
+    if VatioReleaseCheck.source_checkout?(ROOT)
+      abort "Running from a git checkout (#{ROOT}) — update with `git pull` there, not `vatio update`."
+    end
+
+    current = VatioCliVersion::VERSION
+    target = requested || VatioReleaseCheck.latest_tag
+    if target.nil?
+      abort "Could not reach GitHub to resolve the latest release.\nRetry later, or reinstall manually:\n  #{VatioReleaseCheck.install_command}"
+    end
+
+    if requested.nil? && !force && !VatioReleaseCheck.newer?(current: current, latest: target)
+      puts "Vatio CLI #{current} is already the latest release (#{target})."
+      return
+    end
+
+    puts "Updating Vatio CLI #{current} → #{target}…"
+    VatioReleaseCheck.clear_cache!
+    return if VatioReleaseCheck.install!(tag: requested)
+
+    abort "Update failed. Reinstall manually:\n  #{VatioReleaseCheck.install_command}"
+  end
+
+  # Passive, at most once a day: mention that a newer release exists. Stays
+  # quiet when piped, in CI, or opted out, and never fails the command it
+  # trails — a version check is not worth breaking a push over.
+  def notify_new_release(command)
+    return if command == "update"
+    return unless $stderr.tty?
+    return if VatioReleaseCheck.disabled?
+    return if VatioReleaseCheck.source_checkout?(ROOT)
+
+    latest = VatioReleaseCheck.cached_latest_tag
+    return unless VatioReleaseCheck.newer?(current: VatioCliVersion::VERSION, latest: latest)
+
+    warn ""
+    warn "Vatio CLI #{VatioCliVersion::VERSION} is out of date — #{latest} is available."
+    warn "Run `vatio update` to upgrade."
+  rescue StandardError
+    nil
   end
 
   def login_command(argv)
