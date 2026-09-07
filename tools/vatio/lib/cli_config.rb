@@ -124,7 +124,7 @@ class VatioCliConfig
     ws = workspace || resolve_workspace
     return nil if blank?(base) || blank?(ws)
 
-    "#{base}/api/dev/#{ws}"
+    "#{base}/api/v1/#{ws}"
   end
 
   def display_hash
