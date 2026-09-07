@@ -3,10 +3,10 @@
 require_relative "http_client"
 require_relative "sandbox_support"
 
-# HTTP client for programmatic Vatio preview chats (`/api/dev/:ws/sandbox`).
+# HTTP client for programmatic Vatio preview chats (`/api/v1/:ws/sandbox`).
 #
 #   client = VatioSandboxClient.new(
-#     sandbox_url: "http://localhost:3100/api/dev/my-client",
+#     sandbox_url: "http://localhost:3100/api/v1/my-client",
 #     token: "vat_…"
 #   )
 #

@@ -6,7 +6,7 @@ require_relative "http_client"
 # HTTP client for the Vatio deploy API (push / publish / rollback).
 #
 #   client = VatioDeployClient.new(
-#     base_url: "http://localhost:3100/api/dev/my-client",
+#     base_url: "http://localhost:3100/api/v1/my-client",
 #     token: "vat_…"
 #   )
 #   client.push_preview(manifest: {...}, git_sha: "abc")

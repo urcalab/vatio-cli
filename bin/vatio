@@ -656,7 +656,7 @@ class VatioCLI
     token = @config.resolve_token
     abort "VATIO_TOKEN is required (env or `vatio login`)" if token.to_s.empty?
 
-    VatioDeployClient.new(base_url: "#{base}/api/dev/#{workspace}", token: token)
+    VatioDeployClient.new(base_url: "#{base}/api/v1/#{workspace}", token: token)
   end
 
   def load_local_manifest!
