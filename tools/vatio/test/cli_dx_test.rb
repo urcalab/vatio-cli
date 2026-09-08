@@ -53,6 +53,35 @@ class VatioCliDxTest < Minitest::Test
     end
   end
 
+  def test_manifest_loads_knowledge_sources_yaml
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      FileUtils.mkdir_p(File.join(dir, "knowledge"))
+      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help visitors.\n")
+      File.write(File.join(dir, "knowledge", "sources.yml"), <<~YAML)
+        - name: blog
+          site_url: https://example.com
+          url_pattern: "/blog/**"
+      YAML
+
+      manifest = VatioManifestDirectory.load(dir)
+
+      assert_equal [ { "name" => "blog", "site_url" => "https://example.com", "url_pattern" => "/blog/**" } ],
+        manifest["knowledge_sources"]
+    end
+  end
+
+  def test_manifest_loads_with_no_knowledge_sources_yaml
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
+
+      manifest = VatioManifestDirectory.load(dir)
+
+      assert_equal [], manifest["knowledge_sources"]
+    end
+  end
+
   def test_tools_check_requires_the_main_agent
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "agents"))
@@ -144,6 +173,25 @@ class VatioCliDxTest < Minitest::Test
     refute_includes serialized, "secret source"
     refute_includes serialized, "private body"
     assert_equal %w[knowledge tools], result.map { |change| change["type"] }
+  end
+
+  def test_manifest_diff_reports_knowledge_source_changes
+    local = {
+      "knowledge_sources" => [
+        { "name" => "blog", "site_url" => "https://example.com", "url_pattern" => "/blog/**" }
+      ]
+    }
+    remote = {
+      "knowledge_sources" => [
+        { "name" => "blog", "site_url" => "https://example.com", "url_pattern" => "/blog/*" }
+      ]
+    }
+
+    result = VatioManifestDiff.call(local: local, remote: remote)
+
+    assert_equal [
+      { "status" => "modified", "type" => "knowledge_sources", "key" => "blog", "fields" => [ "url_pattern" ] }
+    ], result
   end
 
   def test_http_errors_preserve_status_and_request_id

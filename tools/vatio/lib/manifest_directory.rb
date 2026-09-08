@@ -27,6 +27,7 @@ module VatioManifestDirectory
     Dir.glob(root.join("knowledge", "*.md")).sort.each do |file|
       knowledge << knowledge_entry_from_markdown(file)
     end
+    knowledge_sources = Array(load_yaml(root.join("knowledge", "sources.yml")))
 
     tools = VatioToolSpecParser.load_tools_from_directory(root)
     auth_providers = VatioToolSpecParser.load_auth_providers_from_directory(root)
@@ -37,6 +38,7 @@ module VatioManifestDirectory
       "workspace" => workspace,
       "agents" => agents,
       "knowledge" => knowledge,
+      "knowledge_sources" => knowledge_sources,
       "tools" => tools,
       "auth_providers" => auth_providers,
       "libs" => libs,

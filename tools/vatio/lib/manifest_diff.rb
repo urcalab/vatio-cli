@@ -7,6 +7,7 @@ class VatioManifestDiff
   COLLECTIONS = {
     "agents" => :hash,
     "knowledge" => :source,
+    "knowledge_sources" => :name,
     "tools" => :key,
     "libs" => :key,
     "auth_providers" => :key
