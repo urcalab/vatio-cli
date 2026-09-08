@@ -687,6 +687,11 @@ class VatioCLI
       File.write(root.join("knowledge", source), body)
     end
 
+    sources_path = root.join("knowledge", "sources.yml")
+    File.delete(sources_path) if File.exist?(sources_path)
+    knowledge_sources = Array(manifest["knowledge_sources"])
+    File.write(sources_path, YAML.dump(knowledge_sources)) if knowledge_sources.any?
+
     FileUtils.mkdir_p(root.join("tools"))
     Dir.glob(root.join("tools", "*.{js,yml,yaml}")).each { |path| File.delete(path) }
     Array(manifest["tools"]).each do |entry|

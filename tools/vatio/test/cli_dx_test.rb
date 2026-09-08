@@ -194,6 +194,29 @@ class VatioCliDxTest < Minitest::Test
     ], result
   end
 
+  def test_pull_writes_and_clears_knowledge_sources_yaml
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
+
+      Dir.chdir(dir) do
+        cli = VatioCLI.new
+        manifest = {
+          "workspace" => { "slug" => "girlslab" },
+          "knowledge_sources" => [
+            { "name" => "blog", "site_url" => "https://example.com", "url_pattern" => "/blog/**" }
+          ]
+        }
+
+        cli.send(:write_manifest_to_disk!, manifest)
+        written = VatioYamlCompat.load_file(File.join(dir, "knowledge", "sources.yml"))
+        assert_equal manifest["knowledge_sources"], written
+
+        cli.send(:write_manifest_to_disk!, manifest.merge("knowledge_sources" => []))
+        refute File.exist?(File.join(dir, "knowledge", "sources.yml"))
+      end
+    end
+  end
+
   def test_http_errors_preserve_status_and_request_id
     response = FakeResponse.new(
       "404",
