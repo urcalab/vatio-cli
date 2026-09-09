@@ -57,6 +57,7 @@ class VatioCLI
     when "config" then config_command(argv)
     when "tools" then tools_command(argv)
     when "secrets" then secrets_command(argv)
+    when "sources" then sources_command(argv)
     when "chat"
       if chat_destroy_command?(argv)
         destroy_chat!(argv)
@@ -149,6 +150,11 @@ class VatioCLI
       Tools (JS workspace tools):
         tools check                Validate local tools against Vatio contracts
                                    (also runs automatically before push)
+
+      Sources (knowledge/sources.yml site crawls — read-only; edit + push to change):
+        sources                    List knowledge sources and crawl status
+        sources NAME               Show one source by name
+        sources --environment ENV  Filter by preview|live
 
       Secrets (workspace env for JS tools — never printed; apply immediately):
         secrets list               List secret keys (values are write-only)
@@ -512,6 +518,43 @@ class VatioCLI
     end
   end
 
+  # Read-only: a knowledge source's only mutation path is the manifest
+  # (knowledge/sources.yml + `vatio push`) — this just polls crawl status.
+  def sources_command(argv)
+    workspace_flag = parse_flag!(argv)
+    options = parse_sources_options!(argv)
+    name = argv.shift
+    slug = @config.resolve_workspace(explicit: workspace_flag)
+    abort <<~MSG.chomp if slug.to_s.empty?
+      workspace slug required (--workspace or workspace.yml in current workspace folder)
+    MSG
+
+    client = deploy_client(slug)
+    payload = client.knowledge_sources(environment: options[:environment])
+    sources = Array(payload["data"])
+    sources = sources.select { |row| row["name"] == name } if name
+
+    if sources.empty?
+      puts name ? "No knowledge source named #{name.inspect} on workspace #{slug}" : "No knowledge sources on workspace #{slug}"
+      return
+    end
+
+    puts "Knowledge sources on workspace #{slug} (#{sources.size}):"
+    sources.each do |row|
+      last_crawled = row["last_crawled_at"] || "never"
+      puts "  #{row["name"]} [#{row["environment"]}]  #{row["status"]}  pages=#{row["pages_indexed_count"]}  last_crawled_at=#{last_crawled}"
+      puts "    #{row["site_url"]}  pattern=#{row["url_pattern"]}"
+      puts "    error: #{row["last_error"]}" if row["last_error"]
+    end
+  end
+
+  def parse_sources_options!(argv)
+    options = { environment: nil }
+    OptionParser.new do |opts|
+      opts.on("--environment ENV", %w[preview live], "Filter by environment") { |value| options[:environment] = value }
+    end.parse!(argv)
+    options
+  end
 
   def push(argv)
     workspace = workspace_from!(argv)

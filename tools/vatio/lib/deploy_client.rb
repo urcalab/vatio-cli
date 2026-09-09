@@ -63,6 +63,12 @@ class VatioDeployClient < VatioHttpClient
     delete("/chats/#{chat_id}")
   end
 
+  def knowledge_sources(environment: nil)
+    params = {}
+    params[:environment] = environment if environment
+    get("/deploy/knowledge_sources", params)
+  end
+
   def list_secrets
     get("/deploy/secrets")
   end
