@@ -9,7 +9,7 @@ require_relative "identity_hints"
 require_relative "sandbox_client"
 
 # Preview chat CLI for `vatio chat …`.
-# Always talks to preview (`/api/v1/:ws/sandbox`). Live is for public visitors only.
+# Always talks to preview (`/api/v1/:ws/chats`, environment: "preview"). Live is for public visitors only.
 class VatioSandboxCLI
   include VatioSandboxSupport
 
