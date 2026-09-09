@@ -5,7 +5,7 @@ require "rbconfig"
 require "rubygems/version"
 
 module VatioCliVersion
-  VERSION = "0.4.0"
+  VERSION = "0.5.0"
   MINIMUM_RUBY = Gem::Version.new("2.6.0")
 
   module_function
