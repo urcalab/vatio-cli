@@ -194,6 +194,52 @@ class VatioCliDxTest < Minitest::Test
     ], result
   end
 
+  def test_sources_reindex_resolves_a_name_to_one_source_id
+    reindexed = []
+    client = Object.new
+    client.define_singleton_method(:reindex_knowledge_source) do |id|
+      reindexed << id
+      { "id" => id, "name" => "blog", "environment" => "live", "status" => "pending" }
+    end
+    sources = [ { "id" => 7, "name" => "blog", "environment" => "live" } ]
+
+    cli = VatioCLI.new
+    out, = capture_io do
+      cli.send(:reindex_source!, client, sources, slug: "acme", name: "blog")
+    end
+
+    assert_equal [ 7 ], reindexed
+    assert_includes out, "Reindexing blog [live] on workspace acme (status=pending)"
+  end
+
+  # A bare name matches once per environment, and reindexing the wrong one is a
+  # mistake you only notice later — so it has to stop rather than pick.
+  def test_sources_reindex_refuses_an_ambiguous_name
+    client = Object.new
+    client.define_singleton_method(:reindex_knowledge_source) { |_id| flunk("must not reindex") }
+    sources = [
+      { "id" => 7, "name" => "blog", "environment" => "live" },
+      { "id" => 8, "name" => "blog", "environment" => "preview" }
+    ]
+
+    cli = VatioCLI.new
+    error = assert_raises(SystemExit) do
+      capture_io { cli.send(:reindex_source!, client, sources, slug: "acme", name: "blog") }
+    end
+
+    refute_predicate error, :success?
+  end
+
+  def test_sources_reindex_requires_a_name
+    cli = VatioCLI.new
+    client = Object.new
+    client.define_singleton_method(:reindex_knowledge_source) { |_id| flunk("must not reindex") }
+
+    assert_raises(SystemExit) do
+      capture_io { cli.send(:reindex_source!, client, [], slug: "acme", name: nil) }
+    end
+  end
+
   def test_pull_writes_and_clears_knowledge_sources_yaml
     Dir.mktmpdir do |dir|
       File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")

@@ -151,10 +151,11 @@ class VatioCLI
         tools check                Validate local tools against Vatio contracts
                                    (also runs automatically before push)
 
-      Sources (knowledge/sources.yml site crawls — read-only; edit + push to change):
+      Sources (knowledge/sources.yml site crawls — edit + push to change a declaration):
         sources                    List knowledge sources and crawl status
         sources NAME               Show one source by name
         sources --environment ENV  Filter by preview|live
+        sources reindex NAME       Re-crawl one source without changing its declaration
 
       Secrets (workspace env for JS tools — never printed; apply immediately):
         secrets list               List secret keys (values are write-only)
@@ -523,6 +524,10 @@ class VatioCLI
   def sources_command(argv)
     workspace_flag = parse_flag!(argv)
     options = parse_sources_options!(argv)
+    # Read the subcommand after the flags so `sources reindex blog --environment
+    # live` and `sources --environment live reindex blog` both work.
+    reindex = argv.first == "reindex"
+    argv.shift if reindex
     name = argv.shift
     slug = @config.resolve_workspace(explicit: workspace_flag)
     abort <<~MSG.chomp if slug.to_s.empty?
@@ -533,6 +538,8 @@ class VatioCLI
     payload = client.knowledge_sources(environment: options[:environment])
     sources = Array(payload["data"])
     sources = sources.select { |row| row["name"] == name } if name
+
+    return reindex_source!(client, sources, slug: slug, name: name) if reindex
 
     if sources.empty?
       puts name ? "No knowledge source named #{name.inspect} on workspace #{slug}" : "No knowledge sources on workspace #{slug}"
@@ -555,6 +562,23 @@ class VatioCLI
     discovered = row["pages_discovered_count"]
     indexed = row["pages_indexed_count"]
     discovered ? "#{indexed}/#{discovered}" : indexed.to_s
+  end
+
+  # `sources` is listed per environment, so a bare name can match twice (preview
+  # and live). Reindexing the wrong environment is the kind of mistake you only
+  # notice later, so ask for --environment instead of picking one.
+  def reindex_source!(client, sources, slug:, name:)
+    abort "usage: vatio sources reindex NAME [--environment preview|live]" if name.to_s.empty?
+    abort "No knowledge source named #{name.inspect} on workspace #{slug}" if sources.empty?
+
+    if sources.size > 1
+      environments = sources.map { |row| row["environment"] }.sort.join(", ")
+      abort "#{name.inspect} exists in more than one environment (#{environments}) — pass --environment"
+    end
+
+    row = client.reindex_knowledge_source(sources.first["id"])
+    puts "Reindexing #{row["name"]} [#{row["environment"]}] on workspace #{slug} (status=#{row["status"]})"
+    puts "Crawling runs in the background — check progress with `vatio sources #{row["name"]}`"
   end
 
   def parse_sources_options!(argv)
