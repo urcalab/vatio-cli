@@ -12,7 +12,7 @@ class VatioManifestDiff
     "libs" => :key,
     "auth_providers" => :key
   }.freeze
-  SINGLETONS = %w[workspace authentication].freeze
+  SINGLETONS = %w[business widget authentication].freeze
 
   def self.call(local:, remote:)
     new(local: local, remote: remote).changes

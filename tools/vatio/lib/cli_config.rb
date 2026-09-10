@@ -3,21 +3,24 @@
 require "json"
 require "fileutils"
 require "pathname"
-require_relative "yaml_compat"
 
 # Local-only CLI settings for Vatio under .vatio/ at the developer root.
 # This file contains credentials and must never be committed.
 #
-# Developer root = directory with .vatio/config.json and no workspace.yml at same level.
-# Workspace root = directory with workspace.yml under the developer root.
+# Developer root = directory with .vatio/config.json.
+# Workspace root = a direct child of the developer root; its name is the slug.
 #
 # Token and base_url live only in developer root config.
-# Workspace slug comes from workspace.yml at the workspace root (cwd-based).
+# Workspace slug is the workspace root's directory name (cwd-based) — no file
+# inside the workspace repeats it.
 #
 class VatioCliConfig
   KEYS = %w[base_url token channel from].freeze
   DEFAULT_BASE_URL = "https://vatio.ai"
   REMOVED_KEYS = %w[as].freeze
+  # A workspace directory's name is its slug, so the two share one format.
+  # Keep in sync with Workspace::SLUG_FORMAT in urcalab/vatio.
+  WORKSPACE_SLUG_FORMAT = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
 
   class Error < StandardError; end
 
@@ -40,7 +43,7 @@ class VatioCliConfig
 
   def workspace_root!
     @workspace_root || raise(Error, <<~MSG.chomp)
-      Not inside a Vatio workspace (no workspace.yml found under #{@start_dir}).
+      Not inside a Vatio workspace (#{@start_dir} is not under a workspace folder).
       Run `vatio new workspace SLUG` from the developer root, then cd into the workspace folder.
     MSG
   end
@@ -98,7 +101,7 @@ class VatioCliConfig
     slug = presence(ENV["VATIO_WORKSPACE"])&.downcase
     return slug if slug
 
-    slug_from_workspace_yml
+    slug_from_workspace_root
   end
 
   def resolve_token
@@ -151,15 +154,19 @@ class VatioCliConfig
     save(data)
   end
 
+  # Every directory under the developer root is a workspace, named for its slug.
+  # A freshly created one is empty, so presence of files cannot be the test —
+  # dot-directories (`.vatio`) and names that are not valid slugs are skipped.
   def local_workspace_slugs
     return [] unless @developer_root
 
     @developer_root.children.each_with_object([]) do |entry, slugs|
       next unless entry.directory?
-      next unless entry.join("workspace.yml").file?
 
-      slug = slug_from_path(entry.join("workspace.yml"))
-      slugs << slug if slug
+      slug = entry.basename.to_s
+      next unless slug.match?(WORKSPACE_SLUG_FORMAT)
+
+      slugs << slug
     end.sort
   end
 
@@ -177,8 +184,7 @@ class VatioCliConfig
   def find_developer_root(start)
     current = start
     loop do
-      config = current.join(".vatio", "config.json")
-      return current if config.file? && !current.join("workspace.yml").file?
+      return current if current.join(".vatio", "config.json").file?
 
       parent = current.parent
       break if parent == current
@@ -188,36 +194,28 @@ class VatioCliConfig
     nil
   end
 
+  # A workspace root is a direct child of the developer root, so walk up from
+  # the cwd until the parent is that root. Nothing inside the workspace marks
+  # it — a freshly created one is an empty directory.
   def find_workspace_root(start)
     dev_root = @developer_root
+    return nil unless dev_root
+    return nil unless start.to_s == dev_root.to_s || start.to_s.start_with?("#{dev_root}#{File::SEPARATOR}")
+
     current = start
-    loop do
-      if current.join("workspace.yml").file?
-        return current if dev_root.nil? || current.to_s.start_with?(dev_root.to_s)
-      end
+    while current.parent != current
+      return current if current.parent.to_s == dev_root.to_s
 
-      parent = current.parent
-      break if parent == current
-
-      current = parent
+      current = current.parent
     end
     nil
   end
 
-  def slug_from_workspace_yml
+  def slug_from_workspace_root
     root = @workspace_root
     return nil unless root
 
-    slug_from_path(root.join("workspace.yml"))
-  end
-
-  def slug_from_path(path)
-    return nil unless path.file?
-
-    data = VatioYamlCompat.load_file(path)
-    presence(data["slug"])&.downcase
-  rescue Psych::SyntaxError
-    nil
+    presence(root.basename.to_s)&.downcase
   end
 
   def normalize_key!(key)

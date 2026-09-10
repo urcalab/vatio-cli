@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+require "digest"
 require "open3"
 require "tmpdir"
 require "stringio"
@@ -19,6 +20,10 @@ load File.expand_path("../../../bin/vatio", __dir__) unless defined?(VatioCLI)
 
 class VatioCliDxTest < Minitest::Test
   CLI_PATH = File.expand_path("../../../bin/vatio", __dir__)
+  # Smallest valid PNG — enough to exercise widget.yml's logo handling.
+  ONE_PIXEL_PNG =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/AF+ndrWAAAAAElFTkSuQmCC"
+    .unpack1("m").freeze
   FakeResponse = Struct.new(:code, :body, :message, :headers) do
     def [](key)
       headers[key]
@@ -27,10 +32,10 @@ class VatioCliDxTest < Minitest::Test
 
   def test_yaml_reader_does_not_depend_on_safe_load_file
     Dir.mktmpdir do |dir|
-      path = File.join(dir, "workspace.yml")
-      File.write(path, "slug: girlslab\n")
+      path = File.join(dir, "widget.yml")
+      File.write(path, "accent_color: \"#3355FF\"\n")
 
-      assert_equal({ "slug" => "girlslab" }, VatioYamlCompat.load_file(path))
+      assert_equal({ "accent_color" => "#3355FF" }, VatioYamlCompat.load_file(path))
     end
   end
 
@@ -38,7 +43,6 @@ class VatioCliDxTest < Minitest::Test
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "agents"))
       FileUtils.mkdir_p(File.join(dir, "tools"))
-      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
       File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help visitors.\n")
       File.write(
         File.join(dir, "tools", "lookup.js"),
@@ -48,8 +52,8 @@ class VatioCliDxTest < Minitest::Test
 
       manifest = VatioManifestDirectory.load(dir)
 
-      assert_equal "girlslab", manifest.dig("workspace", "slug")
       assert_equal [ "lookup" ], manifest["tools"].map { |tool| tool["key"] }
+      refute manifest.key?("workspace"), "workspace.yml is gone; nothing should emit a workspace key"
     end
   end
 
@@ -57,7 +61,6 @@ class VatioCliDxTest < Minitest::Test
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "agents"))
       FileUtils.mkdir_p(File.join(dir, "knowledge"))
-      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
       File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help visitors.\n")
       File.write(File.join(dir, "knowledge", "sources.yml"), <<~YAML)
         - name: blog
@@ -72,20 +75,138 @@ class VatioCliDxTest < Minitest::Test
     end
   end
 
+  # Nothing in a workspace is required except agents/main.yml, so an otherwise
+  # empty directory still loads.
   def test_manifest_loads_with_no_knowledge_sources_yaml
     Dir.mktmpdir do |dir|
-      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
-
       manifest = VatioManifestDirectory.load(dir)
 
       assert_equal [], manifest["knowledge_sources"]
+      assert_equal({}, manifest["widget"])
+      assert_equal({}, manifest["business"])
+    end
+  end
+
+  # The slug is the directory name, so a manifest never carries it and a
+  # leftover workspace.yml is simply ignored rather than being read back in.
+  def test_manifest_ignores_a_leftover_workspace_yml
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
+      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\nname: Girlslab\n")
+
+      manifest = VatioManifestDirectory.load(dir)
+
+      refute manifest.key?("workspace")
+      assert_equal({}, manifest["business"])
+      assert_equal({}, manifest["widget"])
+    end
+  end
+
+  def test_manifest_hoists_the_business_block_out_of_the_entry_agent
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      File.write(File.join(dir, "agents", "main.yml"), <<~YAML)
+        key: main
+        name: Acme Support
+        business:
+          name: Acme
+          summary: Acme sells warehouse robotics.
+        instructions: Help visitors.
+      YAML
+
+      manifest = VatioManifestDirectory.load(dir)
+
+      assert_equal({ "name" => "Acme", "summary" => "Acme sells warehouse robotics." },
+        manifest["business"])
+      refute manifest.dig("agents", "main").key?("business"),
+        "business belongs to the workspace, not the agent row"
+      assert_equal "Acme Support", manifest.dig("agents", "main", "name")
+    end
+  end
+
+  def test_manifest_loads_widget_yml_with_its_logo
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
+      File.write(File.join(dir, "widget.yml"), <<~YAML)
+        accent_color: "#3355FF"
+        about: Ask about orders.
+        logo: logo.png
+        allowed_origins:
+          - https://acme.com
+      YAML
+      File.binwrite(File.join(dir, "logo.png"), ONE_PIXEL_PNG)
+
+      widget = VatioManifestDirectory.load(dir)["widget"]
+
+      assert_equal "#3355FF", widget["accent_color"]
+      assert_equal "Ask about orders.", widget["about"]
+      assert_equal [ "https://acme.com" ], widget["allowed_origins"]
+      assert_equal "logo.png", widget.dig("logo", "filename")
+      assert_equal "image/png", widget.dig("logo", "content_type")
+      assert_equal ONE_PIXEL_PNG, widget.dig("logo", "content_base64").unpack1("m")
+      assert_equal Digest::SHA256.hexdigest(ONE_PIXEL_PNG), widget.dig("logo", "digest")
+    end
+  end
+
+  def test_manifest_rejects_a_logo_outside_the_workspace_or_of_the_wrong_type
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
+
+      File.write(File.join(dir, "widget.yml"), "logo: ../escape.png\n")
+      escape = assert_raises(ArgumentError) { VatioManifestDirectory.load(dir) }
+      assert_match(/inside the workspace/, escape.message)
+
+      File.write(File.join(dir, "widget.yml"), "logo: logo.svg\n")
+      File.write(File.join(dir, "logo.svg"), "<svg/>")
+      wrong_type = assert_raises(ArgumentError) { VatioManifestDirectory.load(dir) }
+      assert_match(/must be one of/, wrong_type.message)
+
+      File.write(File.join(dir, "widget.yml"), "logo: missing.png\n")
+      missing = assert_raises(ArgumentError) { VatioManifestDirectory.load(dir) }
+      assert_match(/not found/, missing.message)
+    end
+  end
+
+  # A scheme is its provider file: auth/member.js declares `member`, and the
+  # file's own spec carries the options that workspace.yml used to hold.
+  def test_manifest_derives_auth_schemes_from_the_provider_files
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      FileUtils.mkdir_p(File.join(dir, "auth"))
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
+      File.write(File.join(dir, "auth", "member.js"), <<~JS)
+        export const spec = { proactive: true, channels: ["whatsapp"], profile_authoritative: true };
+        export async function resolve(ctx) { return { status: "denied" }; }
+      JS
+      File.write(File.join(dir, "auth", "partner.js"), <<~JS)
+        export async function resolve(ctx) { return { status: "denied" }; }
+      JS
+
+      manifest = VatioManifestDirectory.load(dir)
+
+      assert_equal(
+        {
+          "member" => {
+            "profile_authoritative" => true, "proactive" => true, "channels" => [ "whatsapp" ]
+          },
+          "partner" => {
+            "profile_authoritative" => false, "proactive" => false, "channels" => []
+          }
+        },
+        manifest.dig("authentication", "schemes")
+      )
+      # The spec is consumed into the schemes; the wire carries only the source.
+      assert_equal [ %w[key source] ], manifest["auth_providers"].map { |row| row.keys.sort }.uniq
+      assert_equal 2, manifest["auth_providers"].length
     end
   end
 
   def test_tools_check_requires_the_main_agent
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "agents"))
-      File.write(File.join(dir, "workspace.yml"), "slug: acme\n")
       File.write(File.join(dir, "agents", "helper.yml"), "key: helper\ninstructions: Help.\n")
 
       result = VatioToolsCheck.call(dir)
@@ -98,10 +219,62 @@ class VatioCliDxTest < Minitest::Test
   def test_tools_check_passes_with_the_main_agent
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "agents"))
-      File.write(File.join(dir, "workspace.yml"), "slug: acme\n")
       File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
 
       assert VatioToolsCheck.call(dir).ok?
+    end
+  end
+
+  def test_tools_check_points_a_protected_tool_at_its_missing_provider_file
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      FileUtils.mkdir_p(File.join(dir, "tools"))
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
+      File.write(File.join(dir, "tools", "orders.yml"), <<~YAML)
+        description: Orders
+        access: member
+        request:
+          method: GET
+          path: /orders
+      YAML
+
+      result = VatioToolsCheck.call(dir)
+
+      refute result.ok?
+      assert_includes result.errors.join, "create auth/member.js"
+    end
+  end
+
+  # The filename becomes the scheme name, and a scheme name takes no hyphens —
+  # so a dashed provider file could never be referenced by a tool.
+  def test_tools_check_rejects_a_dashed_provider_filename
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      FileUtils.mkdir_p(File.join(dir, "auth"))
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
+      File.write(File.join(dir, "auth", "member-tier.js"), "export async function resolve(c) {}\n")
+
+      result = VatioToolsCheck.call(dir)
+
+      refute result.ok?
+      assert_includes result.errors.join, "auth/member-tier.js: the filename is the scheme name"
+    end
+  end
+
+  def test_tools_check_requires_channels_for_a_proactive_scheme
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "agents"))
+      FileUtils.mkdir_p(File.join(dir, "auth"))
+      File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
+      File.write(File.join(dir, "auth", "member.js"), <<~JS)
+        export const spec = { proactive: true };
+        export async function resolve(ctx) { return { status: "denied" }; }
+      JS
+
+      result = VatioToolsCheck.call(dir)
+
+      refute result.ok?
+      assert_includes result.errors.join, "auth/member.js: proactive requires at least one channel"
     end
   end
 
@@ -109,7 +282,6 @@ class VatioCliDxTest < Minitest::Test
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "agents"))
       FileUtils.mkdir_p(File.join(dir, "tools"))
-      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
       File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help visitors.\n")
       File.write(
         File.join(dir, "tools", "lookup.js"),
@@ -142,7 +314,6 @@ class VatioCliDxTest < Minitest::Test
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "agents"))
       FileUtils.mkdir_p(File.join(dir, "tools"))
-      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
       File.write(File.join(dir, "agents", "main.yml"), "key: main\ninstructions: Help.\n")
       File.write(File.join(dir, "tools", "broken.yml"), <<~YAML)
         description: "Missing request method"
@@ -240,26 +411,115 @@ class VatioCliDxTest < Minitest::Test
     end
   end
 
-  def test_pull_writes_and_clears_knowledge_sources_yaml
+  # A workspace root is a directory under a developer root, so pull's tests
+  # need both. Yields the workspace path with the cwd inside it.
+  def with_workspace(slug: "girlslab")
     Dir.mktmpdir do |dir|
-      File.write(File.join(dir, "workspace.yml"), "slug: girlslab\n")
+      FileUtils.mkdir_p(File.join(dir, ".vatio"))
+      File.write(File.join(dir, ".vatio", "config.json"), JSON.generate(base_url: "https://vatio.ai"))
+      workspace = File.join(dir, slug)
+      FileUtils.mkdir_p(workspace)
 
-      Dir.chdir(dir) do
-        cli = VatioCLI.new
-        manifest = {
-          "workspace" => { "slug" => "girlslab" },
-          "knowledge_sources" => [
-            { "name" => "blog", "site_url" => "https://example.com", "url_pattern" => "/blog/**" }
-          ]
-        }
+      Dir.chdir(workspace) { yield workspace }
+    end
+  end
 
-        cli.send(:write_manifest_to_disk!, manifest)
-        written = VatioYamlCompat.load_file(File.join(dir, "knowledge", "sources.yml"))
-        assert_equal manifest["knowledge_sources"], written
+  def test_pull_writes_and_clears_knowledge_sources_yaml
+    with_workspace do |workspace|
+      cli = VatioCLI.new
+      manifest = {
+        "knowledge_sources" => [
+          { "name" => "blog", "site_url" => "https://example.com", "url_pattern" => "/blog/**" }
+        ]
+      }
 
-        cli.send(:write_manifest_to_disk!, manifest.merge("knowledge_sources" => []))
-        refute File.exist?(File.join(dir, "knowledge", "sources.yml"))
-      end
+      cli.send(:write_manifest_to_disk!, manifest)
+      written = VatioYamlCompat.load_file(File.join(workspace, "knowledge", "sources.yml"))
+      assert_equal manifest["knowledge_sources"], written
+
+      cli.send(:write_manifest_to_disk!, manifest.merge("knowledge_sources" => []))
+      refute File.exist?(File.join(workspace, "knowledge", "sources.yml"))
+    end
+  end
+
+  # Pull is the inverse of load: `business` goes back inside agents/main.yml and
+  # the widget keys back into widget.yml, so pull → push round-trips.
+  def test_pull_restores_business_into_the_entry_agent_and_writes_widget_yml
+    with_workspace do |workspace|
+      VatioCLI.new.send(:write_manifest_to_disk!, {
+        "business" => { "name" => "Acme", "summary" => "Sells robotics." },
+        "widget" => {
+          "accent_color" => "#3355FF",
+          "about" => "Ask about orders.",
+          "allowed_origins" => [ "https://acme.com" ]
+        },
+        "agents" => { "main" => { "key" => "main", "instructions" => "Help." } }
+      })
+
+      agent = VatioYamlCompat.load_file(File.join(workspace, "agents", "main.yml"))
+      assert_equal({ "name" => "Acme", "summary" => "Sells robotics." }, agent["business"])
+
+      widget = VatioYamlCompat.load_file(File.join(workspace, "widget.yml"))
+      assert_equal "#3355FF", widget["accent_color"]
+      assert_equal [ "https://acme.com" ], widget["allowed_origins"]
+
+      # Round-trip: loading what pull wrote reproduces the manifest it came from.
+      reloaded = VatioManifestDirectory.load(workspace)
+      assert_equal({ "name" => "Acme", "summary" => "Sells robotics." }, reloaded["business"])
+      assert_equal "#3355FF", reloaded.dig("widget", "accent_color")
+    end
+  end
+
+  # Revisions keep the logo's name and digest, never its bytes, so pull must not
+  # emit a `logo:` line pointing at a file it could not download — that would
+  # make the next push fail.
+  def test_pull_omits_the_logo_key_and_names_it_in_a_comment
+    with_workspace do |workspace|
+      VatioCLI.new.send(:write_manifest_to_disk!, {
+        "widget" => {
+          "accent_color" => "#3355FF",
+          "logo" => { "filename" => "logo.png", "content_type" => "image/png", "digest" => "abc123" }
+        },
+        "agents" => { "main" => { "key" => "main", "instructions" => "Help." } }
+      })
+
+      path = File.join(workspace, "widget.yml")
+      assert_match(/^# The deployed logo is logo\.png/, File.read(path))
+      refute VatioYamlCompat.load_file(path).key?("logo")
+      # And what pull wrote still loads, rather than failing on a missing file.
+      assert_equal "#3355FF", VatioManifestDirectory.load(workspace).dig("widget", "accent_color")
+    end
+  end
+
+  def test_pull_removes_widget_yml_when_the_remote_has_no_widget_config
+    with_workspace do |workspace|
+      path = File.join(workspace, "widget.yml")
+      File.write(path, "accent_color: \"#000000\"\n")
+
+      VatioCLI.new.send(:write_manifest_to_disk!, {
+        "agents" => { "main" => { "key" => "main", "instructions" => "Help." } }
+      })
+
+      refute File.exist?(path)
+    end
+  end
+
+  # The folder name is the slug: nothing inside the workspace repeats it, and
+  # the CLI resolves it from the directory it is standing in.
+  def test_workspace_root_and_slug_come_from_the_directory_layout
+    with_workspace(slug: "acme") do |workspace|
+      config = VatioCliConfig.new(start_dir: workspace)
+
+      assert_equal workspace, config.workspace_root.to_s
+      assert_equal "acme", config.resolve_workspace
+      assert_equal [ "acme" ], config.local_workspace_slugs
+
+      nested = File.join(workspace, "tools")
+      FileUtils.mkdir_p(nested)
+      assert_equal workspace, VatioCliConfig.new(start_dir: nested).workspace_root.to_s
+
+      developer_root = File.dirname(workspace)
+      assert_nil VatioCliConfig.new(start_dir: developer_root).workspace_root
     end
   end
 
@@ -293,12 +553,16 @@ class VatioCliDxTest < Minitest::Test
     refute_includes error.message, "<html>"
   end
 
-  def test_workspace_creation_writes_only_workspace_yml
+  # The directory name is the slug and agents/main.yml is the only required
+  # file, so a new workspace is an empty directory and nothing more.
+  def test_workspace_creation_writes_no_files_at_all
     Dir.mktmpdir do |dir|
       workspace = VatioProjectScaffold.new.create_workspace!(dir, slug: "girlslab")
       files = Dir.glob(workspace.join("**", "*"), File::FNM_DOTMATCH).reject { |path| File.directory?(path) }
 
-      assert_equal [ workspace.join("workspace.yml").to_s ], files
+      assert workspace.directory?
+      assert_equal "girlslab", workspace.basename.to_s
+      assert_empty files
     end
   end
 
