@@ -542,10 +542,19 @@ class VatioCLI
     puts "Knowledge sources on workspace #{slug} (#{sources.size}):"
     sources.each do |row|
       last_crawled = row["last_crawled_at"] || "never"
-      puts "  #{row["name"]} [#{row["environment"]}]  #{row["status"]}  pages=#{row["pages_indexed_count"]}  last_crawled_at=#{last_crawled}"
+      puts "  #{row["name"]} [#{row["environment"]}]  #{row["status"]}  pages=#{sources_pages_display(row)}  last_crawled_at=#{last_crawled}"
       puts "    #{row["site_url"]}  pattern=#{row["url_pattern"]}"
       puts "    error: #{row["last_error"]}" if row["last_error"]
     end
+  end
+
+  # pages_discovered_count is newer than pages_indexed_count — servers
+  # predating it omit the key entirely, so this falls back to the old
+  # single-number display rather than printing "pages=3/".
+  def sources_pages_display(row)
+    discovered = row["pages_discovered_count"]
+    indexed = row["pages_indexed_count"]
+    discovered ? "#{indexed}/#{discovered}" : indexed.to_s
   end
 
   def parse_sources_options!(argv)
