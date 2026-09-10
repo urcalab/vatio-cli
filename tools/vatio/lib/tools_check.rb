@@ -206,14 +206,16 @@ module VatioToolsCheck
       errors << "#{label}: description is blank after load"
     end
 
+    # A loaded tool carries `access` in the wire form the CLI pushes — a bare
+    # scheme string — while a manifest pulled from the platform carries the
+    # normalized {"scheme" => …} hash. Reading only the hash made this check
+    # dead for every locally loaded tool.
     access = tool["access"]
-    return unless access.is_a?(Hash)
-
-    scheme = access["scheme"].to_s
-    return if scheme.empty?
+    scheme = access.is_a?(Hash) ? access["scheme"].to_s : access.to_s
+    return if scheme.empty? || scheme == "public"
 
     unless auth_schemes.key?(scheme)
-      errors << "#{label}: access #{scheme.inspect} is not declared in workspace.yml authentication.schemes"
+      errors << "#{label}: access #{scheme.inspect} has no provider — create auth/#{scheme}.js"
     end
 
     properties = tool.dig("parameters", "properties")
@@ -258,36 +260,31 @@ module VatioToolsCheck
   end
   private_class_method :validate_agent_tool_refs!
 
-  # Keep in sync with Vatio::Authentication::Schemes (JS providers only).
-  AUTH_PROVIDER_JS_FORMAT = /\Aauth\/[a-z0-9]+(?:[-_][a-z0-9]+)*\.js\z/
+  # Keep in sync with Vatio::Authentication::Schemes::SCHEME_FORMAT.
+  AUTH_SCHEME_FORMAT = /\A[a-z][a-z0-9_]{0,63}\z/
 
   # Keep in sync with ChannelIdentity::CHANNELS (CLI has no Rails/DB access).
   KNOWN_CHANNELS = %w[web whatsapp email instagram sandbox cli].freeze
 
+  # A scheme is a provider file, so there is no provider path to check and no
+  # scheme without a file. What can still go wrong is a filename that is not a
+  # usable scheme name, and a proactive block with no or unknown channels.
   def validate_auth_scheme_providers!(schemes, provider_keys, errors)
-    schemes.each do |scheme, config|
-      provider = config.is_a?(Hash) ? config["provider"].to_s.strip : ""
-      next if provider.empty?
+    provider_keys.each do |key|
+      next if key.match?(AUTH_SCHEME_FORMAT)
 
-      unless provider.match?(AUTH_PROVIDER_JS_FORMAT)
-        errors << "authentication.schemes.#{scheme}: provider must be auth/<key>.js"
-        next
-      end
-
-      key = File.basename(provider, ".js")
-      next if provider_keys.include?(key)
-
-      errors << "authentication.schemes.#{scheme}: provider file auth/#{key}.js is missing"
+      errors << "auth/#{key}.js: the filename is the scheme name, so it must be " \
+                "lowercase letters, digits or _ (got #{key.inspect})"
     end
 
     schemes.each do |scheme, config|
       next unless config.is_a?(Hash) && config["proactive"]
 
       channels = Array(config["channels"])
-      errors << "authentication.schemes.#{scheme}: proactive requires at least one channel" if channels.empty?
+      errors << "auth/#{scheme}.js: proactive requires at least one channel" if channels.empty?
       unknown = channels.map(&:to_s) - KNOWN_CHANNELS
       if unknown.any?
-        errors << "authentication.schemes.#{scheme}: channels contains unknown channels: #{unknown.join(", ")}"
+        errors << "auth/#{scheme}.js: channels contains unknown channels: #{unknown.join(", ")}"
       end
     end
   end

@@ -134,7 +134,7 @@ class VatioCLI
         workspaces                 List remote and local workspaces
 
       Global options (deploy + chat destroy):
-        --workspace SLUG           Workspace slug (else workspace.yml from cwd)
+        --workspace SLUG           Workspace slug (else the workspace folder cwd is in)
 
       Deploy:
         push                       Create missing remote workspace, then push preview
@@ -185,12 +185,15 @@ class VatioCLI
 
       Layout:
         agents/                    Developer root (.vatio/config.json)
-          my-client/               Workspace (workspace.yml, agents/main.yml, tools/)
+          my-client/               Workspace — the folder name is the slug
+            agents/main.yml        Required — the agent (and its business block)
+            widget.yml             Optional — color, logo, about, allowed_origins
+            tools/ lib/ auth/ knowledge/
 
       Env overrides:
         VATIO_BASE_URL / config base_url (default https://vatio.ai)
         VATIO_TOKEN / config token (prefix vat_)
-        VATIO_WORKSPACE / --workspace / workspace.yml slug
+        VATIO_WORKSPACE / --workspace / the workspace folder name
         VATIO_CLI_NO_UPDATE_CHECK=1  Silence the daily "new release" notice
 
       Docs: #{DOCS_URL}
@@ -310,27 +313,25 @@ class VatioCLI
   def new_workspace_command(argv)
     slug = argv.shift.to_s.strip.downcase
     abort "Usage: vatio new workspace SLUG [--name NAME]" if slug.empty?
-    abort "Invalid slug (use lowercase letters, numbers, hyphens)" unless slug.match?(WorkspaceSlug::FORMAT)
+    unless slug.match?(VatioCliConfig::WORKSPACE_SLUG_FORMAT)
+      abort "Invalid slug (use lowercase letters, numbers, hyphens)"
+    end
 
     name = nil
     OptionParser.new do |opts|
       opts.on("--name NAME", "Display name") { |value| name = value }
     end.parse!(argv)
 
-    @config.developer_root!
     developer_root = @config.developer_root!
     target = developer_root.join(slug)
-    if target.exist?
-      workspace_file = target.join("workspace.yml")
-      existing_slug = workspace_file.file? ? VatioYamlCompat.load_file(workspace_file)["slug"].to_s : ""
-      unless target.directory? && existing_slug == slug
-        abort "#{target} already exists but is not a compatible Vatio workspace for #{slug.inspect}"
-      end
-      name ||= VatioYamlCompat.load_file(workspace_file)["name"]
+    # The folder name is the slug, so an existing folder of that name already
+    # is the workspace — only a non-directory in the way is a problem.
+    if target.exist? && !target.directory?
+      abort "#{target} already exists and is not a directory"
     end
 
     state = ensure_remote_workspace_for_push!(slug, name: name)
-    VatioProjectScaffold.new.create_workspace!(developer_root, slug: slug, name: name) unless target.exist?
+    VatioProjectScaffold.new.create_workspace!(developer_root, slug: slug) unless target.exist?
 
     puts "#{state == :created ? "Created" : "Linked"} remote workspace #{slug}"
     puts "Local workspace: #{target}"
@@ -465,8 +466,10 @@ class VatioCLI
     result.warnings.each { |msg| warn "warning: #{msg}" }
   end
 
+  # tools/*.yml declarative HTTP tools count too — globbing only *.js reported
+  # "0 tool(s)" for a workspace whose tools are all declarative.
   def tool_count(root)
-    Dir.glob(File.join(root.to_s, "tools", "*.js")).size
+    Dir.glob(File.join(root.to_s, "tools", "*.{js,yml,yaml}")).size
   end
 
   def secrets_command(argv)
@@ -474,7 +477,7 @@ class VatioCLI
     sub = argv.shift
     slug = @config.resolve_workspace(explicit: workspace_flag)
     abort <<~MSG.chomp if slug.to_s.empty?
-      workspace slug required (--workspace or workspace.yml in current workspace folder)
+      workspace slug required (--workspace, or run from inside a workspace folder)
     MSG
 
     client = deploy_client(slug)
@@ -531,7 +534,7 @@ class VatioCLI
     name = argv.shift
     slug = @config.resolve_workspace(explicit: workspace_flag)
     abort <<~MSG.chomp if slug.to_s.empty?
-      workspace slug required (--workspace or workspace.yml in current workspace folder)
+      workspace slug required (--workspace, or run from inside a workspace folder)
     MSG
 
     client = deploy_client(slug)
@@ -720,7 +723,7 @@ class VatioCLI
 
     slug = @config.resolve_workspace(explicit: explicit)
     abort <<~MSG.chomp if slug.to_s.empty?
-      workspace slug required (--workspace or workspace.yml in current workspace folder)
+      workspace slug required (--workspace, or run from inside a workspace folder)
     MSG
 
     slug.downcase
@@ -745,13 +748,16 @@ class VatioCLI
     FileUtils.mkdir_p(root.join("agents"))
     FileUtils.mkdir_p(root.join("knowledge"))
 
-    workspace = (manifest["workspace"] || {}).dup
-    authentication = manifest["authentication"]
-    workspace["authentication"] = authentication if authentication.is_a?(Hash) && authentication.any?
-    File.write(root.join("workspace.yml"), YAML.dump(workspace))
+    write_widget_yml!(root, manifest["widget"])
 
+    # `business` comes back at the manifest root; it is authored inside the
+    # entry agent's file, so fold it back there. Scheme options travel in the
+    # auth/*.js sources below, so nothing else has to be reconstructed.
+    business = manifest["business"]
     Dir.glob(root.join("agents", "*.yml")).each { |path| File.delete(path) }
     (manifest["agents"] || {}).each do |key, data|
+      data = data.merge("business" => business) if key == VatioManifestDirectory::ENTRY_AGENT &&
+        business.is_a?(Hash) && business.any?
       File.write(root.join("agents", "#{key}.yml"), YAML.dump(data))
     end
 
@@ -797,6 +803,30 @@ class VatioCLI
     end
   end
 
+  # A revision keeps the logo's name and digest, never its bytes, so pull
+  # cannot bring the image back. It writes the rest and says so in a comment
+  # rather than emitting a `logo:` line pointing at a file that is not there,
+  # which would make the next push fail. Pushing without the key leaves the
+  # deployed logo alone.
+  def write_widget_yml!(root, widget)
+    path = root.join("widget.yml")
+    widget = widget.is_a?(Hash) ? widget.dup : {}
+    logo = widget.delete("logo")
+    filename = logo.is_a?(Hash) ? logo["filename"].to_s.strip : ""
+
+    if widget.empty? && filename.empty?
+      File.delete(path) if File.exist?(path)
+      return
+    end
+
+    notice = ""
+    unless filename.empty?
+      notice = "# The deployed logo is #{filename}, which pull cannot download.\n" \
+               "# Set `logo: <file>` to replace it; pushing without it keeps the current one.\n"
+    end
+    File.write(path, notice + YAML.dump(widget))
+  end
+
   def slugify(value)
     value.to_s.downcase.gsub(/[^a-z0-9]+/, "-").gsub(/^-|-$/, "").presence || "entry"
   end
@@ -822,7 +852,7 @@ class VatioCLI
     workspace = @config.resolve_workspace(explicit: workspace_flag)
     if workspace.to_s.empty?
       abort <<~MSG.chomp
-        workspace slug required (--workspace or workspace.yml in current workspace folder)
+        workspace slug required (--workspace, or run from inside a workspace folder)
       MSG
     end
 
@@ -858,10 +888,6 @@ class VatioCLI
   rescue StandardError
     nil
   end
-end
-
-module WorkspaceSlug
-  FORMAT = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
 end
 
 class Object

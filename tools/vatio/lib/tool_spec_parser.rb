@@ -23,6 +23,12 @@ module VatioToolSpecParser
     (js + yml).sort_by { |row| row["key"] }
   end
 
+  # auth/*.js — authentication providers. The filename is the scheme name, so
+  # `auth/member.js` declares the `member` scheme that tools reference as
+  # `access: member`. An optional `export const spec` carries the scheme's
+  # options (proactive, channels, profile_authoritative); a provider that only
+  # exports `resolve` gets the defaults. VatioManifestDirectory turns these
+  # specs into `authentication.schemes` and drops `spec` from the wire.
   def load_auth_providers_from_directory(root)
     path = Pathname(root)
     auth_dir = path.join("auth")
@@ -32,11 +38,21 @@ module VatioToolSpecParser
       key = File.basename(file, ".js")
       next unless key.match?(KEY_FORMAT)
 
+      source = File.read(file)
       providers << {
         "key" => key,
-        "source" => File.read(file)
+        "source" => source,
+        "spec" => parse_optional_spec(source, file: file)
       }
     end
+  end
+
+  # Unlike a tool, an auth provider need not export a spec — absent means
+  # "resolve lazily, no proactive channels".
+  def parse_optional_spec(source, file: nil)
+    return {} unless source.match?(/export\s+const\s+spec\s*=/)
+
+    parse_spec(source, file: file)
   end
 
   # Shared JS helpers under lib/*.js (concatenated once into the tools worker bundle).
