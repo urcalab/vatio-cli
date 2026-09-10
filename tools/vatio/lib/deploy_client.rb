@@ -69,6 +69,13 @@ class VatioDeployClient < VatioHttpClient
     get("/deploy/knowledge_sources", params)
   end
 
+  # Queues a fresh crawl for one source. Takes an id, not a name — the API
+  # addresses sources by id, and a name is only unique within an environment.
+  # Returns the source's status object with `status` already "pending".
+  def reindex_knowledge_source(id)
+    post("/deploy/knowledge_sources/#{CGI.escape(id.to_s)}/reindex", {})
+  end
+
   def list_secrets
     get("/deploy/secrets")
   end
